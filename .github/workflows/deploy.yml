@@ -1,0 +1,67 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# GitHub deprecates Node20 JS actions on June 16; force them onto Node24.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Reuse the CI gate so a deploy can never ship untested code
+  # (also gates manual workflow_dispatch runs).
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    name: Migrate D1 + deploy Worker
+    needs: test
+    # Never deploy from forks. The CLOUDFLARE_API_TOKEN secret only exists
+    # upstream, but this guard keeps fork pushes from even attempting it.
+    if: github.repository == 'SawyerHood/glyphdown'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Queue parallel deploys instead of racing or cancelling mid-flight:
+    # a D1 migration + wrangler deploy must run to completion.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      # Account id is not a secret; pinning it here keeps wrangler
+      # non-interactive in CI.
+      CLOUDFLARE_ACCOUNT_ID: 7bb84c630057dafa53e2aacbe6bd094f
+    steps:
+      - name: Fail fast if the deploy secret is missing
+        if: env.CLOUDFLARE_API_TOKEN == ''
+        run: |
+          echo "::error::CLOUDFLARE_API_TOKEN repo secret is not set. Create a Cloudflare API token (Edit Cloudflare Workers template + D1 Edit, account-scoped) and run: gh secret set CLOUDFLARE_API_TOKEN"
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web
+        run: pnpm --filter web build
+
+      - name: Apply D1 migrations
+        # Idempotent: wrangler tracks applied migrations in the d1_migrations
+        # table and exits 0 ("No migrations to apply!") when nothing is pending.
+        run: pnpm --filter web run db:migrate:remote
+
+      - name: Deploy Worker (inkwell)
+        run: pnpm --filter web exec wrangler deploy

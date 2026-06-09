@@ -1,0 +1,108 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	// DO NOT RENAME: Durable Object storage is bound to the worker name —
+	// renaming it would orphan every existing DocDO/SearchDO. The public
+	// identity is the glyphdown.com domain; this stays "inkwell".
+	"name": "inkwell",
+	// Public custom domain (the glyphdown.com zone lives in the owner's
+	// Cloudflare account). Setting routes disables the workers.dev URL by
+	// default, so it is re-enabled explicitly below.
+	"routes": [
+		{ "pattern": "glyphdown.com", "custom_domain": true }
+	],
+	"workers_dev": true,
+	"compatibility_date": "2025-09-02",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"main": "src/server.ts",
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true,
+	"durable_objects": {
+		"bindings": [
+			{
+				// PartyServer derives the URL party segment from the binding
+				// name: DocDO -> /parties/doc-d-o/:room
+				"name": "DocDO",
+				"class_name": "DocDO"
+			},
+			{
+				// Single global full-text/wiki-link index (name 'global').
+				// Internal-only: the Worker never routes public traffic to it
+				// (the /parties auth check requires a real doc id).
+				"name": "SearchDO",
+				"class_name": "SearchDO"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["DocDO"]
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": ["SearchDO"]
+		}
+	],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			// DO NOT RENAME: invisible infra id pinned to the existing
+			// production database (product is now "Glyphdown").
+			"database_name": "inkwell",
+			// Placeholder: create the real database at deploy time with
+			// `wrangler d1 create inkwell` and paste its id here. Local dev
+			// (vite dev / wrangler dev --local) works regardless of this value.
+			"database_id": "d5ca6824-d2f1-4d13-9e1c-10c80e873295",
+			// Drizzle-kit writes SQL migrations here (see drizzle.config.ts);
+			// applied with `pnpm db:migrate:local` / `wrangler d1 migrations apply`.
+			"migrations_dir": "drizzle"
+		}
+	],
+	"r2_buckets": [
+		{
+			// Doc/folder image assets. Local dev simulates R2 on disk; the
+			// operator creates the real bucket at deploy time with
+			// `wrangler r2 bucket create inkwell-assets`.
+			// DO NOT RENAME: invisible infra id pinned to the existing
+			// production bucket (product is now "Glyphdown").
+			"binding": "ASSETS",
+			"bucket_name": "inkwell-assets"
+		}
+	]
+	/**
+	 * Smart Placement
+	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
+	 */
+	// "placement": {  "mode": "smart" }
+	/**
+	 * Bindings
+	 * Bindings allow your Worker to interact with resources on the Cloudflare Developer Platform, including
+	 * databases, object storage, AI inference, real-time communication and more.
+	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/
+	 */
+	/**
+	 * Environment Variables
+	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
+	 * Note: Use secrets to store sensitive data.
+	 * https://developers.cloudflare.com/workers/configuration/secrets/
+	 */
+	// "vars": {  "MY_VARIABLE": "production_value" }
+	/**
+	 * Static Assets
+	 * https://developers.cloudflare.com/workers/static-assets/binding/
+	 */
+	// "assets": {  "directory": "./public/",  "binding": "ASSETS" }
+	/**
+	 * Service Bindings (communicate between multiple Workers)
+	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
+	 */
+	// "services": [  {   "binding": "MY_SERVICE",   "service": "my-service"  } ]
+}

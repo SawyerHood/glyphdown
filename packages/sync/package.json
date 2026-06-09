@@ -1,0 +1,27 @@
+{
+  "name": "@glyphdown/sync",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@glyphdown/core": "workspace:*",
+    "@glyphdown/protocol": "workspace:*",
+    "lib0": "^0.2.117",
+    "partyserver": "^0.5.6",
+    "y-partyserver": "^2.2.0",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.31"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260606.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}

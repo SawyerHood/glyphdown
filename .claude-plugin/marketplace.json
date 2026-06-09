@@ -1,0 +1,31 @@
+{
+  "name": "glyphdown-marketplace",
+  "owner": {
+    "name": "Sawyer Hood",
+    "email": "sawyerjhood@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "glyphdown",
+      "source": "./",
+      "description": "Collaborate on Glyphdown markdown docs from the CLI — clone/sync workspaces, push edits or suggestions, comment, never clobber concurrent human work",
+      "strict": false,
+      "keywords": [
+        "markdown",
+        "collaboration",
+        "docs",
+        "sync",
+        "suggestions",
+        "comments",
+        "crdt"
+      ],
+      "skills": [
+        "./skills/glyphdown"
+      ]
+    }
+  ],
+  "metadata": {
+    "description": "Marketplace for the glyphdown skill",
+    "version": "0.1.0"
+  }
+}

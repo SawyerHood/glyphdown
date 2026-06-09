@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+.output/
+.tanstack/
+.wrangler/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+
+# Logs and OS noise
+*.log
+.DS_Store
+.claude/

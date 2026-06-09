@@ -1,0 +1,48 @@
+# Copy to `.dev.vars` (gitignored) for local dev; production uses
+# `wrangler secret put <NAME>` for each of these.
+
+# Signs better-auth session cookies/tokens — including the device-flow
+# session tokens `glyphdown login` stores and sends as Authorization: Bearer.
+# Generate: openssl rand -hex 32
+BETTER_AUTH_SECRET=replace-with-random-32-byte-hex
+
+# Public origin of the app. vite dev serves on http://localhost:3000.
+# Device-code sign-in (`glyphdown login`) needs no extra secrets: the CLI calls
+# /api/auth/device/* here and humans approve at ${BETTER_AUTH_URL}/device.
+BETTER_AUTH_URL=http://localhost:3000
+
+# GitHub OAuth app — callback URL: ${BETTER_AUTH_URL}/api/auth/callback/github
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+
+# Google OAuth client — redirect URI: ${BETTER_AUTH_URL}/api/auth/callback/google
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+
+# Outbound email (invites, mention notifications) via Resend
+# (https://resend.com — API keys → create, then verify the sending domain).
+# OPTIONAL: leave RESEND_API_KEY unset and the app degrades gracefully —
+# would-be emails are logged to the console and the share dialog offers a
+# copy-invite-link button instead.
+RESEND_API_KEY=
+# From header for all outbound email; the domain must be verified in Resend.
+EMAIL_FROM=Glyphdown <invites@glyphdown.com>
+
+# ---------------------------------------------------------------------------
+# PostHog analytics + error reporting. ALL OPTIONAL: with no keys set, the
+# entire analytics layer no-ops silently (no posthog-js download, no /capture
+# calls) and every product flow works exactly the same.
+#
+# SERVER side (Worker: the cli_push event + Worker error reporting). Local
+# dev reads these from `.dev.vars`; production uses
+# `wrangler secret put POSTHOG_KEY`.
+POSTHOG_KEY=
+# Ingestion host; defaults to https://us.i.posthog.com when unset.
+POSTHOG_HOST=https://us.i.posthog.com
+#
+# CLIENT side (browser: pageviews, product events, error tracking). NOTE:
+# VITE_* vars are vite BUILD-time env, not Worker secrets — `.dev.vars` does
+# not feed them. Put them in `apps/web/.env` (gitignored) for local dev, and
+# set them in the build environment for `pnpm build` / deploy:
+#   VITE_POSTHOG_KEY=phc_...                      # same PostHog project key
+#   VITE_POSTHOG_HOST=https://us.i.posthog.com    # optional, same default

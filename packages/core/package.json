@@ -1,0 +1,22 @@
+{
+  "name": "@glyphdown/core",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@sanity/diff-match-patch": "^3.2.0",
+    "yjs": "^13.6.31"
+  },
+  "devDependencies": {
+    "fast-check": "^4.8.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}

@@ -1,0 +1,395 @@
+@import url("https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Inter:wght@400;500;600;700&display=swap");
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* ---------------------------------------------------------------------------
+   Glyphdown tokens: clean, document-first. Paper surfaces, quiet ink text, one
+   accent. Dark mode mirrors the same roles.
+--------------------------------------------------------------------------- */
+
+:root {
+  /* Rendered tables track the app palette in both themes. */
+  --ink-table-border: var(--line);
+  --ink-table-header-bg: var(--paper-soft);
+  /* Body ink: a deep charcoal, just shy of the heading near-black, for strong
+     contrast on white. Editor body text + cm-content track this via var(--ink). */
+  --ink: #23282e;
+  /* Heading ink holds the original near-black so headings stay dark while body
+     ink softens. Consumed by the editor's .cm-ink-heading rule. */
+  --ink-heading: #1c2733;
+  --ink-soft: #51606e;
+  --ink-faint: #8b97a3;
+  --paper: #ffffff;
+  --paper-soft: #f4f5f7;
+  --bg-base: #eef0f3;
+  --line: rgba(28, 39, 51, 0.14);
+  --accent: #2563eb;
+  --accent-deep: #1d4ed8;
+  --accent-soft: rgba(37, 99, 235, 0.1);
+  --header-bg: rgba(255, 255, 255, 0.85);
+
+  /* Editor typography tokens consumed by the @glyphdown/editor theme via
+     var(--ink-*, <light fallback>). Declared on :root so they inherit into the
+     editor and track dark mode automatically (each aliases an app token that
+     the dark block below already retunes) — the editor package can't declare
+     them itself without shadowing this override. */
+  --ink-heading-muted: var(--ink-soft);
+  /* Muted block ink (blockquotes, footnote defs) + the left rule on quotes
+     (a clear medium gray — stronger than the hairline --line used for the
+     full-width heading anchors, since a 3px vertical bar needs presence). */
+  --ink-block-muted: var(--ink-soft);
+  --ink-block-border: color-mix(in srgb, var(--ink-faint) 70%, transparent);
+  /* Quiet code surfaces (fenced block + inline chip). */
+  --ink-code-bg: var(--paper-soft);
+  --ink-code-bg-inline: color-mix(in srgb, var(--ink-soft) 14%, transparent);
+
+  /* Legacy aliases (starter pages reference these). */
+  --sea-ink: var(--ink);
+  --sea-ink-soft: var(--ink-soft);
+  --lagoon: var(--accent);
+  --lagoon-deep: var(--accent-deep);
+  --surface: var(--paper);
+  --surface-strong: var(--paper);
+  --kicker: var(--ink-faint);
+  --chip-bg: var(--paper);
+  --chip-line: var(--line);
+  --link-bg-hover: var(--paper-soft);
+}
+
+:root[data-theme="dark"] {
+  --ink-highlight-bg: rgba(255, 196, 0, 0.28);
+  --ink: #e6ebf0;
+  /* Headings sit slightly brighter than body ink in dark, mirroring the
+     darker-than-body heading relationship in light mode. */
+  --ink-heading: #f2f6fa;
+  --ink-soft: #a3b0bd;
+  --ink-faint: #6c7884;
+  --paper: #161c23;
+  --paper-soft: #1f2730;
+  --bg-base: #10151b;
+  --line: rgba(230, 235, 240, 0.14);
+  --accent: #5b8def;
+  --accent-deep: #7da4f2;
+  --accent-soft: rgba(91, 141, 239, 0.16);
+  --header-bg: rgba(16, 21, 27, 0.85);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ink: #e6ebf0;
+    --ink-heading: #f2f6fa;
+    --ink-soft: #a3b0bd;
+    --ink-faint: #6c7884;
+    --paper: #161c23;
+    --paper-soft: #1f2730;
+    --bg-base: #10151b;
+    --line: rgba(230, 235, 240, 0.14);
+    --accent: #5b8def;
+    --accent-deep: #7da4f2;
+    --accent-soft: rgba(91, 141, 239, 0.16);
+    --header-bg: rgba(16, 21, 27, 0.85);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  background-color: var(--bg-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--accent-deep);
+}
+
+code {
+  font-size: 0.9em;
+  background: var(--paper-soft);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+
+.page-wrap {
+  width: min(960px, calc(100% - 2rem));
+  margin-inline: auto;
+}
+
+.display-title {
+  font-family: "Source Serif 4", Georgia, serif;
+}
+
+.island-shell {
+  border: 1px solid var(--line);
+  background: var(--paper);
+  border-radius: 12px;
+}
+
+.island-kicker {
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-weight: 600;
+  font-size: 0.69rem;
+  color: var(--ink-faint);
+}
+
+.nav-link {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  color: var(--ink-soft);
+}
+
+.nav-link:hover,
+.nav-link.is-active {
+  color: var(--ink);
+}
+
+/* ---------------------------------------------------------------------------
+   Editor chrome
+--------------------------------------------------------------------------- */
+
+.ink-editor {
+  height: 100%;
+}
+
+.ink-editor .cm-editor {
+  height: 100%;
+  background-color: var(--paper);
+  color: var(--ink);
+}
+
+.ink-editor .cm-editor .cm-scroller {
+  overflow: auto;
+  font-family: var(--font-sans);
+}
+
+/* Three-class selectors so these win specificity ties against the editor
+   package's built-in EditorView.theme (glyphdownTheme) rules. */
+.ink-editor .cm-editor .cm-content {
+  max-width: 65ch;
+  margin: 0 auto;
+  padding: 40px 0 50vh;
+  caret-color: var(--ink);
+  color: var(--ink);
+}
+
+.ink-editor .cm-editor .cm-line {
+  /* Horizontal longhand (not the `padding` shorthand): the editor's heading/hr
+     line classes carry their vertical rhythm as padding-top/bottom (CM6's
+     height model excludes margin but includes padding — keeps click position
+     in sync). A `padding: 0 20px` shorthand here would reset that vertical
+     padding to 0 and reintroduce the click-drift, so set only the axis we own. */
+  padding-left: 20px;
+  padding-right: 20px;
+  /* Base padding the editor's list hanging-indent rule composes with —
+     must mirror the padding-left above. */
+  --ink-line-pad: 20px;
+}
+
+.ink-editor .cm-editor .cm-cursor {
+  border-left-color: var(--ink);
+}
+
+/* Active comment flash (sidebar -> editor navigation). */
+@keyframes ink-flash {
+  0% {
+    background-color: rgba(250, 204, 21, 0.65);
+  }
+  100% {
+    background-color: rgba(250, 204, 21, 0.3);
+  }
+}
+
+.cm-ink-comment.ink-flash {
+  animation: ink-flash 1.2s ease-out;
+}
+
+/* Remote selection name flags (y-codemirror.next) need a base position. */
+.ink-editor .cm-ySelectionInfo {
+  font-family: var(--font-sans);
+  font-size: 10px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  opacity: 1;
+}
+
+/* History diff rendering */
+.ink-diff ins {
+  background: rgba(34, 197, 94, 0.18);
+  color: inherit;
+  text-decoration: none;
+  border-radius: 2px;
+}
+
+.ink-diff del {
+  background: rgba(239, 68, 68, 0.14);
+  color: var(--ink-faint);
+  text-decoration: line-through;
+  border-radius: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+   Loading skeletons (DocSkeletons.tsx) + the doc-switch crossfade.
+
+   - .skeleton-bar: shimmering ghost bar. Paper-soft ↔ bg-base keeps it subtle
+     and theme-correct in both light and dark (CSS vars only).
+   - .skeleton-appear: anti-flash — invisible for the first 80ms, so loads
+     that resolve faster never flash a skeleton.
+   - .doc-fade: the ~150ms opacity crossfade between the skeleton overlay and
+     the synced editor (duration mirrored in useLoadingFade's LOADING_FADE_MS).
+--------------------------------------------------------------------------- */
+
+.skeleton-bar {
+  border-radius: 6px;
+  background-color: var(--paper-soft);
+  background-image: linear-gradient(
+    100deg,
+    var(--paper-soft) 35%,
+    var(--bg-base) 50%,
+    var(--paper-soft) 65%
+  );
+  background-size: 250% 100%;
+  animation: skeleton-shimmer 1.6s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+  from {
+    background-position: 125% 0;
+  }
+  to {
+    background-position: -125% 0;
+  }
+}
+
+.skeleton-appear {
+  animation: skeleton-appear 120ms ease-out 80ms both;
+}
+
+@keyframes skeleton-appear {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.doc-fade {
+  transition: opacity 150ms ease-out;
+}
+
+/* While the overlay fades out, freeze the bars' appear animation: a load
+   that beat the 80ms delay keeps its bars invisible (no late ghost flash),
+   a slow load crossfades its fully-visible bars smoothly. */
+.doc-skeleton-frozen .skeleton-appear {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-bar {
+    animation: none;
+    background-image: none;
+  }
+  /* Keep the 80ms anti-flash delay, drop the fade itself. */
+  .skeleton-appear {
+    animation-duration: 1ms;
+  }
+  .doc-fade {
+    transition: none;
+  }
+}
+
+.fade-in {
+  animation: fade-in 200ms ease-out both;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.rise-in {
+  animation: rise-in 500ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Renderer polish: theme-aware divider + quote borders (editor baseTheme is light-only). */
+.ink-editor .cm-editor .cm-ink-hr-widget {
+  border-top-color: var(--line);
+}
+
+/* Block-render tuning: table widget inset matches .cm-line padding (20px).
+   Wide tables may bleed symmetrically past the 65ch prose column by up to
+   96px per side. Only the design CAP is set here as a plain length; the widget
+   clamps the EFFECTIVE bleed per-table to the editor's real available width
+   (measured in its ResizeObserver — the cm-scroller's client width, which
+   already excludes the file sidebar and the scrollbar). The old
+   clamp((100vw - …)/2) read the raw viewport and overstated the bleed whenever
+   a sidebar was open, spilling the table past the visible editor where the
+   scroller clipped it; measuring the actual column space fixes that. Beyond
+   the bleed the table scrolls internally (with an edge fade). */
+.ink-editor .cm-editor .cm-ink-table-widget {
+  --ink-table-inset: 0 20px;
+  --ink-table-bleed-max: 96px;
+  /* Custom horizontal scrollbar (the widget draws its own, since macOS overlay
+     scrollbars reserve no space and hide at rest — a wide table read as a hard
+     clip). A clearly visible thumb that tracks the app palette in both themes;
+     darker than the hairline table border so the scroll affordance is
+     discoverable. */
+  --ink-table-scrollbar: color-mix(in srgb, var(--ink-faint) 75%, transparent);
+  --ink-table-scrollbar-hover: var(--ink-faint);
+}
+
+/* Table editing chrome (cell overlay outline, structure menus, the small
+   floating add-row/add-col "+" buttons) follows the app theme; these live on
+   the editor root because the floating controls are appended to the scroller,
+   outside the widget.
+
+   The add buttons are small round icon-buttons keyed to the VISIBLE scroll box
+   (centered under it / pinned to its right edge), not full-width bars — so they
+   stay small and on-screen even when a wide table scrolls. They use the app's
+   paper surface + quiet ink, mirroring the header/share/⋯-handle buttons, and
+   brighten to the accent on hover. Both tokens track dark mode via --paper /
+   --ink-soft, so no separate dark override is needed. */
+.ink-editor .cm-editor {
+  --ink-table-accent: var(--accent);
+  --ink-table-menu-bg: var(--paper);
+  --ink-table-add-bg: var(--paper);
+  --ink-table-add-fg: var(--ink-soft);
+}

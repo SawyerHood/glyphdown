@@ -1,0 +1,66 @@
+{
+  "name": "glyphdown",
+  "version": "0.1.1",
+  "description": "Glyphdown CLI — Google Docs for markdown, built for AI agents: pull docs to plain files, edit, push back through CRDT merging; clone/sync mirrors your whole account",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "glyphdown": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "keywords": [
+    "markdown",
+    "cli",
+    "collaboration",
+    "crdt",
+    "yjs",
+    "sync",
+    "ai-agents",
+    "glyphdown",
+    "documents",
+    "realtime"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SawyerHood/glyphdown.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://glyphdown.com",
+  "bugs": {
+    "url": "https://github.com/SawyerHood/glyphdown/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json",
+    "dev": "tsx src/bin.ts",
+    "build:npm": "node scripts/build-npm.mjs",
+    "publish:npm": "node scripts/publish-npm.mjs",
+    "prepack": "node scripts/prepack.mjs",
+    "postpack": "node scripts/postpack.mjs",
+    "build:bin": "bun build --compile src/bin.ts --outfile dist/glyphdown",
+    "build:bin:all": "bun build --compile --target=bun-darwin-arm64 src/bin.ts --outfile dist/glyphdown-darwin-arm64 && bun build --compile --target=bun-darwin-x64 src/bin.ts --outfile dist/glyphdown-darwin-x64 && bun build --compile --target=bun-linux-x64 src/bin.ts --outfile dist/glyphdown-linux-x64 && bun build --compile --target=bun-linux-arm64 src/bin.ts --outfile dist/glyphdown-linux-arm64"
+  },
+  "dependencies": {
+    "@glyphdown/core": "workspace:*",
+    "@glyphdown/protocol": "workspace:*",
+    "commander": "^14.0.2",
+    "picocolors": "^1.1.1",
+    "yjs": "^13.6.31"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "esbuild": "^0.28.0",
+    "tsx": "^4.20.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}

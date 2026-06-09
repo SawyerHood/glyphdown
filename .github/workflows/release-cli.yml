@@ -1,0 +1,127 @@
+name: Release CLI
+
+# Publishes the `glyphdown` npm package and attaches the bun-compiled standalone
+# binaries to a GitHub Release.
+#
+# How to cut a release:
+#   1. Bump packages/cli/package.json "version" (e.g. 0.1.1) and merge to main.
+#   2. Tag the commit `cli-v0.1.1` and push the tag:
+#        git tag cli-v0.1.1 && git push origin cli-v0.1.1
+#   …or run this workflow manually (Actions -> Release CLI -> Run workflow) and
+#   pass the version (without the `cli-v` prefix). The release job asserts the
+#   tag/input version matches packages/cli/package.json so a mistagged release
+#   can never publish the wrong version.
+#
+# npm authentication uses TRUSTED PUBLISHING (OIDC) — no NPM_TOKEN secret needed.
+# ONE-TIME SETUP on npmjs.com (owner, once per package):
+#   1. https://www.npmjs.com/package/glyphdown/access  (or Settings tab)
+#   2. "Trusted Publisher" -> "GitHub Actions"
+#   3. Organization or user: SawyerHood
+#      Repository:            glyphdown
+#      Workflow filename:     release-cli.yml
+#      Environment:           (leave blank)
+#   4. Save. From then on this workflow publishes with zero stored credentials
+#      and npm auto-attaches a provenance attestation.
+# FALLBACK (if OIDC trusted publishing is unavailable): set an automation token
+#   as a repo secret — `gh secret set NPM_TOKEN` — and this workflow falls back
+#   to token auth automatically (see the "Publish to npm" step).
+
+on:
+  push:
+    tags:
+      - 'cli-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (must equal packages/cli/package.json, e.g. 0.1.1)'
+        required: true
+        type: string
+
+# GitHub deprecates Node20 JS actions on June 16; force them onto Node24.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Reuse the CI gate so a release can never ship untested code.
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Publish npm + GitHub Release
+    needs: test
+    # Never publish from forks (the trusted-publisher binding + any NPM_TOKEN
+    # only exist upstream, but this guard stops fork tags from even trying).
+    if: github.repository == 'SawyerHood/glyphdown'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # create the GitHub Release + upload binaries
+      id-token: write # OIDC token for npm trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing (OIDC) requires npm CLI >= 11.5.1; ubuntu-latest's
+      # bundled npm is older, so upgrade it on the runner.
+      - name: Upgrade npm (trusted publishing needs >= 11.5.1)
+        run: npm install -g npm@latest
+
+      - name: Resolve release version
+        id: version
+        run: |
+          PKG_VERSION="$(node -p "require('./packages/cli/package.json').version")"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG_VERSION="${{ inputs.version }}"
+          else
+            TAG_VERSION="${GITHUB_REF_NAME#cli-v}"
+          fi
+          echo "Tag/input version: $TAG_VERSION"
+          echo "package.json version: $PKG_VERSION"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Release version ($TAG_VERSION) does not match packages/cli/package.json ($PKG_VERSION). Bump package.json or fix the tag."
+            exit 1
+          fi
+          echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build npm bundle
+        run: pnpm --filter glyphdown run build:npm
+
+      # Trusted publishing: npm detects the OIDC environment and authenticates
+      # without a token; `--provenance` attaches a signed provenance attestation.
+      # If an NPM_TOKEN secret is present, fall back to token auth instead.
+      - name: Publish to npm (trusted publishing / OIDC)
+        working-directory: packages/cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: node scripts/publish-npm.mjs --provenance
+
+      - name: Set up bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build standalone binaries (all targets)
+        run: pnpm --filter glyphdown run build:bin:all
+
+      - name: Create GitHub Release with binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cli-v${{ steps.version.outputs.version }}
+          name: glyphdown CLI v${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          files: |
+            packages/cli/dist/glyphdown-darwin-arm64
+            packages/cli/dist/glyphdown-darwin-x64
+            packages/cli/dist/glyphdown-linux-x64
+            packages/cli/dist/glyphdown-linux-arm64
