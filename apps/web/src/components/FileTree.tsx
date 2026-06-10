@@ -31,9 +31,11 @@ import {
 import { buildFileTree, folderWithDescendants, formatBytes, sortAssets, type TreeFolderNode } from '../lib/fileTree.ts'
 import { liveSlug, slugifyDocStem } from '../lib/slug.ts'
 import { loadCollapsedFolders, saveCollapsedFolders } from '../lib/fileTreePanel.ts'
+import { useActiveVault } from '../lib/useActiveVault.ts'
 import { useDismissable } from '../lib/useDismissable.ts'
 import { useFileMutations, useTransientToast } from '../lib/useFileMutations.ts'
 import { ConfirmDialog, Dialog } from './ui.tsx'
+import VaultSwitcher from './VaultSwitcher.tsx'
 
 /**
  * Obsidian-style file tree: one tree where every doc always exists — folders
@@ -41,12 +43,15 @@ import { ConfirmDialog, Dialog } from './ui.tsx'
  * docs. Lives inside the slide-out panel (FileTreeShell); shares the ['docs']
  * / ['folders'] query keys with the dashboard so both views stay in sync.
  *
- * Drag-and-drop (owners only): docs move between folders/root (PATCH doc
- * folderId); folders move under other folders or to the root (PATCH folder
- * parentId). Dropping a folder into itself or its own subtree is rejected
- * client-side (instant no-drop cursor) — the server enforces the same rule
- * plus the depth cap and reports 'cycle'/'too-deep', surfaced as a toast.
- * Hovering a collapsed folder mid-drag auto-expands it after a short delay.
+ * Drag-and-drop (owners only): docs move between folders (PATCH doc
+ * folderId); folders move under other folders (PATCH folder parentId). The
+ * ROOT level holds only vaults now, so nothing drops there and vaults
+ * themselves never drag (they are immovable roots); the header "new" buttons
+ * create in the ACTIVE vault. Dropping a folder into itself or its own
+ * subtree is rejected client-side (instant no-drop cursor) — the server
+ * enforces the same rule plus the depth cap and reports 'cycle'/'too-deep',
+ * surfaced as a toast. Hovering a collapsed folder mid-drag auto-expands it
+ * after a short delay.
  */
 
 export const DOC_DRAG_MIME = 'application/x-glyphdown-doc'
@@ -146,6 +151,12 @@ export default function FileTree({ onClose }: { onClose: () => void }) {
   const folderNodes = tree.filter((n): n is TreeFolderNode => n.kind === 'folder')
   const rootDocs = tree.flatMap((n) => (n.kind === 'doc' ? [n.doc] : []))
 
+  // The header "new" buttons create in the ACTIVE vault (the root level holds
+  // only vaults — nothing can be created there). Null only when the account
+  // has no vault yet: doc creation still works (the server homes it into a
+  // freshly minted default vault), folder creation needs a vault first.
+  const activeVaultId = useActiveVault()?.id ?? null
+
   const hasDocDrag = (e: DragEvent) => e.dataTransfer.types.includes(DOC_DRAG_MIME)
   const hasFolderDrag = (e: DragEvent) => e.dataTransfer.types.includes(FOLDER_DRAG_MIME)
 
@@ -203,43 +214,35 @@ export default function FileTree({ onClose }: { onClose: () => void }) {
       <div className="flex h-12 shrink-0 items-center gap-0.5 border-b border-[var(--line)] px-3">
         <span className="island-kicker">Files</span>
         <div className="ml-auto flex items-center gap-0.5">
-          <TreeIconButton label="New document" onClick={() => setCreating({ kind: 'doc', folderId: null })}>
+          <TreeIconButton
+            label="New document"
+            onClick={() => {
+              if (activeVaultId !== null) expandFolder(activeVaultId)
+              setCreating({ kind: 'doc', folderId: activeVaultId })
+            }}
+          >
             <FilePlus2 size={14} />
           </TreeIconButton>
-          <TreeIconButton label="New folder" onClick={() => setCreating({ kind: 'folder', parentId: null })}>
-            <FolderPlus size={14} />
-          </TreeIconButton>
+          {activeVaultId !== null ? (
+            <TreeIconButton
+              label="New folder"
+              onClick={() => {
+                expandFolder(activeVaultId)
+                setCreating({ kind: 'folder', parentId: activeVaultId })
+              }}
+            >
+              <FolderPlus size={14} />
+            </TreeIconButton>
+          ) : null}
           <TreeIconButton label="Close panel (⌘\)" onClick={onClose}>
             <PanelLeft size={14} />
           </TreeIconButton>
         </div>
       </div>
 
-      <div
-        className={`min-h-0 flex-1 overflow-y-auto py-1.5 ${dragOver === 'root' ? 'bg-[var(--accent-soft)]' : ''}`}
-        onDragOver={(e) => {
-          if (!hasDocDrag(e) && !(hasFolderDrag(e) && draggingFolder !== null)) return
-          e.preventDefault()
-          e.dataTransfer.dropEffect = 'move'
-          setDragOver('root')
-        }}
-        onDragLeave={(e) => {
-          if (e.currentTarget === e.target) setDragOver(null)
-        }}
-        onDrop={(e) => {
-          setDragOver(null)
-          const folderId = e.dataTransfer.getData(FOLDER_DRAG_MIME)
-          if (folderId) {
-            e.preventDefault()
-            mutations.moveFolderTo(folderId, null)
-            return
-          }
-          const docId = e.dataTransfer.getData(DOC_DRAG_MIME)
-          if (!docId) return
-          e.preventDefault()
-          mutations.moveDocTo(docId, null)
-        }}
-      >
+      {/* No root drop zone anymore: the root level holds only vaults, so
+          "move to root" is not a thing — drops land on folder/vault rows. */}
+      <div className="min-h-0 flex-1 overflow-y-auto py-1.5">
         {docsQuery.isLoading || foldersQuery.isLoading ? (
           <TreeSkeleton />
         ) : signedOut ? (
@@ -311,10 +314,16 @@ export default function FileTree({ onClose }: { onClose: () => void }) {
         )}
       </div>
 
+      {/* Pinned footer: the vault switcher (dropdown opens upward). The tree
+          above lists EVERY vault as a root; this controls the ACTIVE vault
+          (Cmd+K scoping, the `/` redirect, where new docs land) without
+          navigating away from the open doc. */}
+      <VaultSwitcher variant="sidebar" />
+
       {toast ? (
         <div
           role="status"
-          className="pointer-events-none absolute bottom-3 left-1/2 z-10 max-w-[90%] -translate-x-1/2 rounded-md bg-[var(--ink)] px-2.5 py-1.5 text-center text-xs text-[var(--paper)] shadow-lg"
+          className="pointer-events-none absolute bottom-14 left-1/2 z-10 max-w-[90%] -translate-x-1/2 rounded-md bg-[var(--ink)] px-2.5 py-1.5 text-center text-xs text-[var(--paper)] shadow-lg"
         >
           {toast}
         </div>
@@ -351,6 +360,9 @@ export default function FileTree({ onClose }: { onClose: () => void }) {
 function FolderItem({ node, depth, ctx }: { node: TreeFolderNode; depth: number; ctx: TreeCtx }) {
   const { folder } = node
   const isOwner = folder.role === 'owner'
+  // Vaults are immovable roots: they never drag, and they leave the tree only
+  // through the dedicated vault-delete flow (vault switcher), not the ⋯ menu.
+  const isVault = folder.kind === 'vault'
   const expanded = !ctx.collapsed[folder.id]
   const renamingThis = ctx.renaming?.kind === 'folder' && ctx.renaming.folder.id === folder.id
   const dragOver = ctx.dragOverId === folder.id
@@ -397,9 +409,9 @@ function FolderItem({ node, depth, ctx }: { node: TreeFolderNode; depth: number;
             dragOver ? 'bg-[var(--accent-soft)] outline outline-1 outline-[var(--accent)]' : 'hover:bg-[var(--paper-soft)]'
           }`}
           style={rowIndent(depth)}
-          draggable={isOwner}
+          draggable={isOwner && !isVault}
           onDragStart={(e) => {
-            if (!isOwner) return
+            if (!isOwner || isVault) return
             e.stopPropagation()
             ctx.startFolderDrag(e, folder)
           }}
@@ -507,12 +519,16 @@ function FolderItem({ node, depth, ctx }: { node: TreeFolderNode; depth: number;
                     icon: <Pencil size={13} />,
                     onSelect: () => ctx.setRenaming({ kind: 'folder', folder }),
                   },
-                  {
-                    label: 'Delete',
-                    icon: <Trash2 size={13} />,
-                    onSelect: () => ctx.requestDelete({ kind: 'folder', id: folder.id, name: folder.name }),
-                    danger: true,
-                  },
+                  ...(isVault
+                    ? [] // vault delete = the typed-confirmation flow in the vault switcher
+                    : [
+                        {
+                          label: 'Delete',
+                          icon: <Trash2 size={13} />,
+                          onSelect: () => ctx.requestDelete({ kind: 'folder', id: folder.id, name: folder.name }),
+                          danger: true,
+                        },
+                      ]),
                 ]}
               />
             </span>

@@ -149,15 +149,30 @@ export const folders = sqliteTable(
       .references(() => user.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
     /**
-     * Nested folders: null = root. Plain nullable FK on purpose — folder
-     * deletion promotes children to the deleted folder's parent in code
-     * (DELETE /api/folders/:id), so no ON DELETE action ever fires. The
-     * depth cap (≤ 10) and cycle guard are enforced in the API layer.
+     * Vaults are special root folders (SPEC: every doc lives in exactly one
+     * vault). Post-backfill invariant, API-enforced: parent_id IS NULL ⟺
+     * kind = 'vault' — vaults never move/nest, plain folders never root.
+     */
+    kind: text('kind', { enum: ['folder', 'vault'] })
+      .notNull()
+      .default('folder'),
+    /**
+     * Nested folders: null = root (a vault). Plain nullable FK on purpose —
+     * folder deletion promotes children to the deleted folder's parent in
+     * code (DELETE /api/folders/:id), so no ON DELETE action ever fires. The
+     * depth cap and cycle guard are enforced in the API layer.
      */
     parentId: text('parent_id').references((): AnySQLiteColumn => folders.id),
     createdAt: integer('created_at').notNull(),
   },
-  (t) => [index('folders_owner_idx').on(t.ownerUserId), index('folders_parent_idx').on(t.parentId)],
+  (t) => [
+    index('folders_owner_idx').on(t.ownerUserId),
+    index('folders_parent_idx').on(t.parentId),
+    /** Vault names address vaults in the CLI — unique per owner, case-insensitively, among vaults only. */
+    uniqueIndex('folders_vault_name_unique')
+      .on(t.ownerUserId, sql`lower(name)`)
+      .where(sql`kind = 'vault'`),
+  ],
 )
 
 export const docs = sqliteTable(
@@ -328,6 +343,12 @@ export const userPrefs = sqliteTable('user_prefs', {
     .references(() => user.id, { onDelete: 'cascade' }),
   /** 1 = send mention/notification emails (default), 0 = opted out. */
   emailNotifications: integer('email_notifications').notNull().default(1),
+  /**
+   * The vault folderless createDoc calls land in (and the web app's initial
+   * vault). Nullable: missing/stale ids are healed by ensureDefaultVault
+   * (api/vaults.ts), which also creates the `Home` vault on first need.
+   */
+  defaultVaultId: text('default_vault_id').references(() => folders.id),
 })
 
 /**

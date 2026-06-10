@@ -165,16 +165,40 @@ export type ClientMessage = { t: 'suggestion-upsert'; suggestion: SuggestionReco
 //          { title } payloads are slugified). Renames and folder moves
 //          re-check uniqueness in the target scope and return 409
 //          `filename-taken` on collision — no silent suffixing.
+//          `folderId: null` is rejected (400 `bad-folder`): every doc lives
+//          in a vault's subtree, there is no root scope to move into.
+// POST   /api/docs/:id/restore                -> {} -> DocMeta (owner-only)
+//          Restores a trashed doc. If its folder is gone (or it was trashed
+//          from the pre-vault root), it re-homes into the owner's default
+//          vault; filename collisions in the target scope are suffixed
+//          (-2, -3, …) like create — restore never fails on a name.
 // GET    /api/docs/:id/content?view=...       -> text/markdown (+ X-Glyphdown-Version, X-Glyphdown-Base-Hash;
 //          the legacy X-Inkroom-* names are echoed alongside for one release
 //          so outdated `ink` binaries keep working)
 // POST   /api/docs/:id/push                   -> PushRequest -> PushResponse
+// GET    /api/vaults                          -> { vaults: VaultMeta[] } (owned vaults + vaults with a DIRECT
+//                                                folder_members grant on the vault root, with the effective role)
+// POST   /api/vaults                          -> { name } -> VaultMeta (409 `name-taken` on a case-insensitive
+//                                                collision with another of the caller's vaults)
+// PATCH  /api/vaults/:id                      -> { name } -> VaultMeta (rename ONLY, owner-only; same 409
+//                                                `name-taken` guard; vaults never move — a parentId is rejected
+//                                                with 400 `vault-immovable`)
+// DELETE /api/vaults/:id                      -> { ok } (owner-only; soft-deletes EVERY doc in the vault's
+//                                                subtree into the 30-day trash and hard-deletes the subtree's
+//                                                folder rows, so restore re-homes docs into the default vault.
+//                                                400 `last-vault` / `default-vault` protect the caller's only
+//                                                vault and their default vault)
 // GET    /api/folders                         -> { folders: FolderMeta[] } (owned + granted + descendants of granted)
-// POST   /api/folders                         -> { name, parentId? } -> FolderMeta (parent must be caller-owned; depth ≤ 10)
+// POST   /api/folders                         -> { name, parentId } -> FolderMeta (parent required and caller-owned —
+//                                                its chain must terminate in a vault; depth-capped)
 // GET    /api/folders/:id                     -> FolderMeta (role = max over the folder's ancestor chain)
-// PATCH  /api/folders/:id                     -> { name?, parentId?: string|null } -> FolderMeta
-//                                                (move = owner-only; 400 `cycle` / `too-deep` on violation)
-// DELETE /api/folders/:id                     -> { ok } (child folders + docs promote to the deleted folder's parent)
+// PATCH  /api/folders/:id                     -> { name?, parentId?: string } -> FolderMeta
+//                                                (move = owner-only; 400 `cycle` / `too-deep` on violation;
+//                                                vaults cannot move at all and plain folders cannot move to
+//                                                root — `parentId: null` is rejected with 400)
+// DELETE /api/folders/:id                     -> { ok } (child folders + docs promote to the deleted folder's
+//                                                parent; vaults are refused — 400 `vault-undeletable` — until the
+//                                                dedicated vault-delete flow lands)
 // ...comments/suggestions/versions proxied through to the DO surface above.
 
 export interface DocMeta {
@@ -233,11 +257,15 @@ export function docFilenameStem(filename: string): string {
 // ---------------------------------------------------------------------------
 // Search (global index DO behind the Worker)
 // ---------------------------------------------------------------------------
-// GET /api/search?q=<query>        -> { results: SearchResult[] }
+// GET /api/search?q=<query>[&vault=<vaultId>]  -> { results: SearchResult[] }
 //   Full-text search over every doc the caller can access (same accessible
 //   set as GET /api/docs, folder inheritance included). Titles come from D1.
+//   `vault` (optional) narrows to that vault's subtree BEFORE the result
+//   limit, so scoped searches aren't lossy; the caller must be able to see
+//   the vault (owner or a folder grant on/under it), else 404.
 // GET /api/docs/:id/backlinks      -> { docs: DocMeta[] }
-//   Docs (visible to the caller) whose bodies wiki-link [[this doc's title]].
+//   Docs (visible to the caller) whose bodies wiki-link [[this doc's title]],
+//   filtered to the linked doc's vault (wiki links resolve in-vault).
 
 export interface SearchResult {
   docId: string
@@ -249,23 +277,71 @@ export interface SearchResult {
 }
 
 /**
- * Folder row from the /api/folders surface. Folders nest (parentId, null =
- * root) up to MAX_FOLDER_DEPTH levels; a grant (membership or share link) on
- * a folder applies to every doc in its entire subtree, and `role` is the
- * caller's effective role: max(owner, folder_members on the folder or any
- * ancestor).
+ * Folder row from the /api/folders surface. Folders nest (parentId) up to
+ * MAX_FOLDER_DEPTH levels; a grant (membership or share link) on a folder
+ * applies to every doc in its entire subtree, and `role` is the caller's
+ * effective role: max(owner, folder_members on the folder or any ancestor).
+ *
+ * `kind` partitions the tree: every root row (parentId null) is a VAULT — an
+ * Obsidian-style root namespace docs live under — and every non-root row is a
+ * plain `folder`. Vaults cannot be moved or nested, plain folders cannot
+ * become roots, and every doc lives in some vault's subtree.
  */
+export type FolderKind = 'folder' | 'vault'
+
 export interface FolderMeta {
   id: string
   name: string
+  kind: FolderKind
   parentId: string | null
   ownerUserId: string
   role: Role
   createdAt: number
 }
 
-/** Maximum folder nesting depth (a root folder has depth 1). API-enforced. */
-export const MAX_FOLDER_DEPTH = 10
+/**
+ * Vault row from the /api/vaults surface. A vault IS a folder row (kind =
+ * 'vault', parentId null) — these routes are thin wrappers that enforce the
+ * vault invariants — so this is FolderMeta minus the fields a vault pins
+ * (kind, parentId). `role` is owner for owned vaults, else the caller's max
+ * DIRECT grant on the vault root (a grant on a subfolder shares that subtree,
+ * not the vault).
+ */
+export interface VaultMeta {
+  id: string
+  name: string
+  ownerUserId: string
+  role: Role
+  createdAt: number
+}
+
+/**
+ * Maximum folder nesting depth (a root has depth 1). API-enforced. The vault
+ * root consumes a level, so this is 11 — pre-vault trees could legitimately
+ * be 10 deep and gained a vault above them in the backfill.
+ */
+export const MAX_FOLDER_DEPTH = 11
+
+// ---------------------------------------------------------------------------
+// Folder share-link landing surface
+// ---------------------------------------------------------------------------
+// GET /api/folders/:id/listing            -> FolderListingResponse
+//   The one folder-scoped read that accepts a share token (?share= /
+//   X-Glyphdown-Share) the way doc GETs do, so a folder/vault share link has
+//   a web landing page (/f/:folderId?share=<token>). The token must be an
+//   unrevoked folder link whose target is :id or one of its ancestors;
+//   anonymous visitors are capped at viewer (view-role links only), signed-in
+//   visitors get max(own grants, link role). Returns the folder plus its
+//   ENTIRE live subtree — never anything outside it.
+
+export interface FolderListingResponse {
+  /** The requested folder, with the caller's effective role. */
+  folder: FolderMeta
+  /** Every visible descendant folder (the requested folder excluded). */
+  folders: FolderMeta[]
+  /** Every live doc in the subtree (the requested folder included). */
+  docs: DocMeta[]
+}
 
 // ---------------------------------------------------------------------------
 // Assets (images stored in R2, scoped to a doc's folder — or the doc itself

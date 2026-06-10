@@ -38,6 +38,7 @@ function fakeApi(overrides: Partial<Api> = {}): Api {
     listFolders: vi.fn(async () => []),
     getFolder: vi.fn(),
     createFolder: vi.fn(),
+    listVaults: vi.fn(async () => []),
     getContent: vi.fn(async () => ({ text: '# Launch Plan\n\nShip it.\n', versionId: 'v1', baseHash: null })),
     push: vi.fn(async (): Promise<PushResponse> => ({ ok: true, mode: 'edit', applied: 1, failedHunks: [], versionId: 'v2' })),
     listComments: vi.fn(async () => [] as Comment[]),

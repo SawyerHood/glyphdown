@@ -23,6 +23,8 @@ glyphdown sync                    # two-way reconcile, run before AND after edit
 
 `sync` operates on the cwd — run it inside the workspace (or pass the dir: `glyphdown sync work`).
 
+**Vaults**: every doc lives in one vault (an Obsidian-style root namespace; a full clone shows vaults as top-level dirs). `glyphdown vaults --json` lists yours; `glyphdown clone --vault <name|id>` makes a workspace confined to one vault (clone and sync both ignore everything outside it); `glyphdown new <name> --vault <vault>` creates at its top level. Vault names resolve case-insensitively; with neither `--vault` nor `--folder`, `new` lands in the key owner's default vault.
+
 Sync prints one action per doc/folder: `pushed` / `pulled` / `merged` / `created` (new local file → new doc) / `new` (new server doc) / `folder created` / `new folder (server)` / `renamed locally: old → new` / `local missing — re-pulled` / `remote gone` / `up to date`.
 
 **Exit codes** (always check): `0` clean · `2` failed hunks — printed like git `.rej`; re-apply those edits by hand and sync again · `3` degenerate skip — your change rewrites most of a doc that drifted; re-pull and redo, or `--force` ONLY if the rewrite is intentional — never blind `--force` on a shared doc · `1` anything else (read stderr).
@@ -48,7 +50,7 @@ glyphdown comment <doc> --resolve <id> [--body "..."] # resolve (reply first if 
 
 ## Rules
 
-- `--json` on read commands (`list`, `cat`, `comments`, `suggestions`, `new`, `sync`) for parsing.
+- `--json` on read commands (`list`, `vaults`, `cat`, `comments`, `suggestions`, `new`, `sync`) for parsing.
 - Filenames are canonical slugs (`[a-z0-9-]` + `.md`); the file name IS the doc name everywhere. The `# heading` is just content.
 - Don't rewrite >60% of a shared doc in one push (the server refuses with exit 3). `glyphdown snapshot <doc> -m "msg"` before big changes.
 - Deletions never propagate: deleted local files re-pull; server-deleted docs warn (`remote gone`) and stay local. Delete via the web UI.

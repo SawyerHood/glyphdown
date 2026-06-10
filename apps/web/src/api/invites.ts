@@ -50,6 +50,16 @@ export interface InviteTarget {
   ownerUserId: string
   /** Display name: doc filename stem or folder name. */
   title: string
+  /**
+   * For folder targets: whether the folder is a vault root — vault shares say
+   * "vault", not "folder", in emails, notifications, and the landing page.
+   */
+  kind?: 'folder' | 'vault'
+}
+
+/** Copy noun for a share target ('vault' when a folder target is a vault root). */
+function shareNoun(targetType: 'doc' | 'folder', kind?: 'folder' | 'vault'): 'doc' | 'folder' | 'vault' {
+  return targetType === 'folder' && kind === 'vault' ? 'vault' : targetType
 }
 
 // ---------------------------------------------------------------------------
@@ -134,13 +144,20 @@ export async function handleInvitesCollection(
       role,
       by: auth.principal.id,
       byName: auth.principal.name,
+      ...(targetType === 'folder' ? { kind: target.kind ?? 'folder' } : {}),
     })
 
-    const url = targetType === 'doc' ? `${origin}/d/${target.id}` : `${origin}/`
+    const url = targetType === 'doc' ? `${origin}/d/${target.id}` : `${origin}/?folder=${target.id}`
     const result = await sendEmail(
       {
         to: email,
-        ...addedEmail({ inviterName: auth.principal.name, targetName: target.title, targetType, role, url }),
+        ...addedEmail({
+          inviterName: auth.principal.name,
+          targetName: target.title,
+          targetType: shareNoun(targetType, target.kind),
+          role,
+          url,
+        }),
       },
       { env: emailEnv },
     )
@@ -186,7 +203,13 @@ export async function handleInvitesCollection(
   const result = await sendEmail(
     {
       to: email,
-      ...inviteEmail({ inviterName: auth.principal.name, targetName: target.title, targetType, role, url }),
+      ...inviteEmail({
+        inviterName: auth.principal.name,
+        targetName: target.title,
+        targetType: shareNoun(targetType, target.kind),
+        role,
+        url,
+      }),
     },
     { env: emailEnv },
   )
@@ -209,10 +232,13 @@ export async function handleInvitesCollection(
 export async function getInvitePublic(db: Db, token: string): Promise<Response> {
   const loaded = await loadLiveInvite(db, token)
   if (!loaded) return json({ error: 'not-found' }, 404)
-  const { invite, targetName } = loaded
+  const { invite, targetName, targetKind } = loaded
   const inviterName = await principalName(db, invite.invitedBy)
   return json({
     targetType: invite.targetType,
+    // 'doc' | 'folder' | 'vault' — lets the landing page say "vault" for
+    // folder invites whose folder is a vault root.
+    targetKind,
     targetName,
     inviterName,
     role: invite.role,
@@ -334,6 +360,8 @@ interface LoadedInvite {
   invite: typeof invites.$inferSelect
   targetName: string
   ownerUserId: string
+  /** Copy noun: 'vault' for folder targets that are vault roots. */
+  targetKind: 'doc' | 'folder' | 'vault'
 }
 
 /** Invite row + live target; null for unknown/revoked tokens or dead targets. */
@@ -348,11 +376,17 @@ async function loadLiveInvite(db: Db, token: string): Promise<LoadedInvite | nul
       invite,
       targetName: doc.filename !== '' ? docFilenameStem(doc.filename) : doc.title,
       ownerUserId: doc.ownerUserId,
+      targetKind: 'doc',
     }
   }
   const folder = (await db.select().from(folders).where(eq(folders.id, invite.targetId)).limit(1))[0]
   if (!folder) return null
-  return { invite, targetName: folder.name, ownerUserId: folder.ownerUserId }
+  return {
+    invite,
+    targetName: folder.name,
+    ownerUserId: folder.ownerUserId,
+    targetKind: shareNoun('folder', folder.kind),
+  }
 }
 
 /**

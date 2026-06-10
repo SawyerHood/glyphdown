@@ -1,4 +1,4 @@
-import { slugifyDocStem, type DocMeta, type PushRequest, type PushResponse } from '@glyphdown/protocol'
+import { slugifyDocStem, type DocMeta, type PushRequest, type PushResponse, type VaultMeta } from '@glyphdown/protocol'
 import type { FolderMeta } from '../src/index.ts'
 import { createApi, createProgram, md5Hex, sha256Hex, writePull } from '../src/index.ts'
 
@@ -82,7 +82,8 @@ function availableIn(state: FakeServer, folderId: string | null, requested: stri
 }
 
 export function folder(id: string, name: string, parentId: string | null = null): FolderMeta {
-  return { id, name, parentId, ownerUserId: 'u1', role: 'owner', createdAt: 1 }
+  // Mirrors the post-vaults server shape: root rows are vaults.
+  return { id, name, kind: parentId === null ? 'vault' : 'folder', parentId, ownerUserId: 'u1', role: 'owner', createdAt: 1 }
 }
 
 export function jsonResponse(body: unknown, status = 200): Response {
@@ -103,6 +104,15 @@ export function fetchFor(state: FakeServer): typeof fetch {
     const path = url.pathname
 
     if (method === 'GET' && path === '/api/folders') return jsonResponse({ folders: state.folders })
+    if (method === 'GET' && path === '/api/vaults') {
+      // Mirrors the real /api/vaults: vault rows (kind='vault') as VaultMeta,
+      // oldest first — FolderMeta minus the fields a vault pins.
+      const vaults = state.folders
+        .filter((f) => f.kind === 'vault')
+        .map(({ id, name, ownerUserId, role, createdAt }): VaultMeta => ({ id, name, ownerUserId, role, createdAt }))
+        .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+      return jsonResponse({ vaults })
+    }
     if (method === 'POST' && path === '/api/folders') {
       const body = JSON.parse(init?.body as string) as { name?: string; parentId?: string }
       const parentId = body.parentId ?? null
@@ -243,6 +253,11 @@ export interface Harness {
   run: (args: string[]) => Promise<void>
 }
 
+// picocolors turns styling on whenever CI is set, so harness assertions must
+// see the unstyled text in any environment.
+const ANSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g')
+const stripAnsi = (s: string) => s.replace(ANSI_PATTERN, '')
+
 export function harness(dir: string, state: FakeServer): Harness {
   const lines: string[] = []
   const errors: string[] = []
@@ -250,8 +265,8 @@ export function harness(dir: string, state: FakeServer): Harness {
     makeApi: (cfg) => createApi({ serverUrl: cfg.serverUrl, apiKey: 'gd_sk_test', fetchImpl: fetchFor(state) }),
     env: { GLYPHDOWN_SERVER: SERVER, GLYPHDOWN_API_KEY: 'gd_sk_test' },
     cwd: () => dir,
-    out: (l) => lines.push(l),
-    err: (l) => errors.push(l),
+    out: (l) => lines.push(stripAnsi(l)),
+    err: (l) => errors.push(stripAnsi(l)),
   })
   return { lines, errors, run: (args) => program.parseAsync(args, { from: 'user' }).then(() => undefined) }
 }

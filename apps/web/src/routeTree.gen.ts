@@ -16,6 +16,7 @@ import { Route as AdminRouteImport } from './routes/admin'
 import { Route as AboutRouteImport } from './routes/about'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as InviteTokenRouteImport } from './routes/invite.$token'
+import { Route as FFolderIdRouteImport } from './routes/f.$folderId'
 import { Route as DDocIdIndexRouteImport } from './routes/d.$docId.index'
 import { Route as DDocIdHistoryRouteImport } from './routes/d.$docId.history'
 
@@ -54,6 +55,11 @@ const InviteTokenRoute = InviteTokenRouteImport.update({
   path: '/invite/$token',
   getParentRoute: () => rootRouteImport,
 } as any)
+const FFolderIdRoute = FFolderIdRouteImport.update({
+  id: '/f/$folderId',
+  path: '/f/$folderId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const DDocIdIndexRoute = DDocIdIndexRouteImport.update({
   id: '/d/$docId/',
   path: '/d/$docId/',
@@ -72,6 +78,7 @@ export interface FileRoutesByFullPath {
   '/device': typeof DeviceRoute
   '/login': typeof LoginRoute
   '/settings': typeof SettingsRoute
+  '/f/$folderId': typeof FFolderIdRoute
   '/invite/$token': typeof InviteTokenRoute
   '/d/$docId/history': typeof DDocIdHistoryRoute
   '/d/$docId/': typeof DDocIdIndexRoute
@@ -83,6 +90,7 @@ export interface FileRoutesByTo {
   '/device': typeof DeviceRoute
   '/login': typeof LoginRoute
   '/settings': typeof SettingsRoute
+  '/f/$folderId': typeof FFolderIdRoute
   '/invite/$token': typeof InviteTokenRoute
   '/d/$docId/history': typeof DDocIdHistoryRoute
   '/d/$docId': typeof DDocIdIndexRoute
@@ -95,6 +103,7 @@ export interface FileRoutesById {
   '/device': typeof DeviceRoute
   '/login': typeof LoginRoute
   '/settings': typeof SettingsRoute
+  '/f/$folderId': typeof FFolderIdRoute
   '/invite/$token': typeof InviteTokenRoute
   '/d/$docId/history': typeof DDocIdHistoryRoute
   '/d/$docId/': typeof DDocIdIndexRoute
@@ -108,6 +117,7 @@ export interface FileRouteTypes {
     | '/device'
     | '/login'
     | '/settings'
+    | '/f/$folderId'
     | '/invite/$token'
     | '/d/$docId/history'
     | '/d/$docId/'
@@ -119,6 +129,7 @@ export interface FileRouteTypes {
     | '/device'
     | '/login'
     | '/settings'
+    | '/f/$folderId'
     | '/invite/$token'
     | '/d/$docId/history'
     | '/d/$docId'
@@ -130,6 +141,7 @@ export interface FileRouteTypes {
     | '/device'
     | '/login'
     | '/settings'
+    | '/f/$folderId'
     | '/invite/$token'
     | '/d/$docId/history'
     | '/d/$docId/'
@@ -142,6 +154,7 @@ export interface RootRouteChildren {
   DeviceRoute: typeof DeviceRoute
   LoginRoute: typeof LoginRoute
   SettingsRoute: typeof SettingsRoute
+  FFolderIdRoute: typeof FFolderIdRoute
   InviteTokenRoute: typeof InviteTokenRoute
   DDocIdHistoryRoute: typeof DDocIdHistoryRoute
   DDocIdIndexRoute: typeof DDocIdIndexRoute
@@ -198,6 +211,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof InviteTokenRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/f/$folderId': {
+      id: '/f/$folderId'
+      path: '/f/$folderId'
+      fullPath: '/f/$folderId'
+      preLoaderRoute: typeof FFolderIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/d/$docId/': {
       id: '/d/$docId/'
       path: '/d/$docId'
@@ -222,6 +242,7 @@ const rootRouteChildren: RootRouteChildren = {
   DeviceRoute: DeviceRoute,
   LoginRoute: LoginRoute,
   SettingsRoute: SettingsRoute,
+  FFolderIdRoute: FFolderIdRoute,
   InviteTokenRoute: InviteTokenRoute,
   DDocIdHistoryRoute: DDocIdHistoryRoute,
   DDocIdIndexRoute: DDocIdIndexRoute,

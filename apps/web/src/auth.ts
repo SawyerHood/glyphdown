@@ -4,6 +4,7 @@ import { bearer, deviceAuthorization } from 'better-auth/plugins'
 import { tanstackStartCookies } from 'better-auth/tanstack-start'
 import { createDb } from './db/client.ts'
 import * as schema from './db/schema.ts'
+import { ensureDefaultVault } from './api/vaults.ts'
 import type { AppEnv } from './env.ts'
 
 /** client_id the `glyphdown` CLI sends on /device/code and /device/token. */
@@ -33,6 +34,22 @@ export function createAuth(env: AppEnv) {
     }),
     secret: env.BETTER_AUTH_SECRET,
     baseURL: env.BETTER_AUTH_URL,
+    databaseHooks: {
+      user: {
+        create: {
+          // Every new account starts with a `Home` vault as its default
+          // (vaults plan §1). Best-effort: createDoc/restore re-run the same
+          // idempotent helper, so a failure here never strands the user.
+          after: async (newUser) => {
+            try {
+              await ensureDefaultVault(db, newUser.id)
+            } catch (err) {
+              console.error('ensureDefaultVault on signup failed:', err)
+            }
+          },
+        },
+      },
+    },
     socialProviders: {
       github: {
         clientId: env.GITHUB_CLIENT_ID ?? '',

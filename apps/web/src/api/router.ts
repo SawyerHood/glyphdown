@@ -1,7 +1,7 @@
 import { env, waitUntil } from 'cloudflare:workers'
 import { getServerByName, type Server } from 'partyserver'
 import { and, desc, eq, inArray, isNull, ne } from 'drizzle-orm'
-import { docFilenameStem, type DocMeta, type FolderMeta, type Principal, type PushResponse, type Role } from '@glyphdown/protocol'
+import { docFilenameStem, type DocMeta, type FolderListingResponse, type FolderMeta, type Principal, type PushResponse, type Role, type VaultMeta } from '@glyphdown/protocol'
 import { HEADER_COMMENT_AUTHOR } from '@glyphdown/sync'
 import { asAppEnv } from '../env.ts'
 import { createDb, type Db } from '../db/client.ts'
@@ -18,6 +18,7 @@ import {
   fetchAncestorChain,
   fetchFolderSubtrees,
   folderGrantMap,
+  folderShareLinkRole,
   maxRole,
   resolveDocAccess,
   resolveFolderRole,
@@ -27,6 +28,7 @@ import { MAX_FOLDER_DEPTH, planFolderDelete, propagateFolderRoles, validateMove 
 import { handleDocAssets, handleFolderAssets } from './assets.ts'
 import { feedTitleToIndex, handleBacklinks, handleSearch, removeFromIndex } from './search.ts'
 import { availableFilename, filenameForCreate, filenameFromPatch } from './filenames.ts'
+import { ensureDefaultVault } from './vaults.ts'
 
 /**
  * Public HTTP API (protocol §Public HTTP API): the Worker authenticates each
@@ -106,6 +108,10 @@ export async function handleApi(request: Request): Promise<Response | null> {
     return handleFolders(db, request, url)
   }
 
+  if (url.pathname === '/api/vaults' || url.pathname.startsWith('/api/vaults/')) {
+    return handleVaults(db, request, url)
+  }
+
   if (url.pathname === '/api/agents' || url.pathname.startsWith('/api/agents/')) {
     return handleAgents(db, request, url)
   }
@@ -161,12 +167,17 @@ async function createDoc(db: Db, request: Request, principal: Principal): Promis
   if (userId === null) return json({ error: 'forbidden' }, 403)
   const payload = await readJson<{ filename?: unknown; title?: unknown; folderId?: unknown }>(request)
 
-  let folderId: string | null = null
+  // Every doc lives in a vault's subtree: an explicit folderId wins, else the
+  // caller's default vault (for agents: the OWNER's — userId is already the
+  // effective user). ensureDefaultVault creates `Home` on first need.
+  let folderId: string
   if (typeof payload?.folderId === 'string' && payload.folderId !== '') {
     const folder = (await db.select().from(folders).where(eq(folders.id, payload.folderId)).limit(1))[0]
     if (!folder) return json({ error: 'folder-not-found' }, 404)
     if (folder.ownerUserId !== userId) return json({ error: 'forbidden' }, 403)
     folderId = folder.id
+  } else {
+    folderId = await ensureDefaultVault(db, userId)
   }
 
   // Canonical name: explicit `filename` wins, a bare `title` is slugified.
@@ -223,6 +234,19 @@ async function handleDocScoped(
   // shareTokenFrom also accepts the legacy x-inkroom-share header (pre-rename links).
   const shareToken = shareTokenFrom(url, request)
   const access = await resolveDocAccess(db, docId, principal, shareToken)
+
+  // Restore must reach trashed docs, which every other doc route 404s —
+  // handle it before the deleted gate. Owner-only; everyone else gets the
+  // same 404 a trashed doc gives them anyway (no existence leak).
+  if (subPath === '/restore') {
+    if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405)
+    if (!access || access.role !== 'owner' || !principal) {
+      if (!principal && !shareToken) return json({ error: 'unauthenticated' }, 401)
+      return json({ error: 'not-found' }, 404)
+    }
+    return restoreDoc(db, access.doc, { principal, role: access.role })
+  }
+
   if (!access || access.doc.deletedAt !== null || access.role === null) {
     // Unauthenticated callers get a 401 (so the CLI can prompt for login);
     // everyone else gets 404 to avoid leaking doc existence.
@@ -329,14 +353,14 @@ async function patchDoc(db: Db, request: Request, doc: DocRow, auth: AuthContext
   }
 
   if (payload.folderId !== undefined) {
-    if (payload.folderId === null || payload.folderId === '') {
-      update.folderId = null
-    } else if (typeof payload.folderId === 'string') {
+    if (typeof payload.folderId === 'string' && payload.folderId !== '') {
       const folder = (await db.select().from(folders).where(eq(folders.id, payload.folderId)).limit(1))[0]
       if (!folder) return json({ error: 'folder-not-found' }, 404)
       if (folder.ownerUserId !== doc.ownerUserId) return json({ error: 'forbidden' }, 403)
       update.folderId = folder.id
     } else {
+      // null/'' included: there is no root scope — every doc stays in some
+      // vault's subtree (vaults plan §1 invariants).
       return json({ error: 'bad-folder' }, 400)
     }
   }
@@ -349,8 +373,27 @@ async function patchDoc(db: Db, request: Request, doc: DocRow, auth: AuthContext
     if (taken.has(targetName)) return json({ error: 'filename-taken' }, 409)
   }
 
+  // A move changes which folder grants reach this doc — capture the OLD
+  // ancestor chain (the doc's folder included) before the update so the
+  // principals granted there get their live connections rechecked, mirroring
+  // patchFolder. Conservative: survivors simply reconnect.
+  const moved = update.folderId !== undefined && update.folderId !== doc.folderId
+  const oldChain = moved ? await fetchAncestorChain(db, doc.folderId) : []
+
   await db.update(docs).set(update).where(eq(docs.id, doc.id))
   if (update.filename !== undefined) feedTitleToIndex(doc.id, docFilenameStem(update.filename))
+
+  if (moved && oldChain.length > 0) {
+    const lost = await db
+      .select({ principalId: folderMembers.principalId })
+      .from(folderMembers)
+      .where(inArray(folderMembers.folderId, oldChain))
+    // 'anonymous' covers visitors riding a folder share link on an old
+    // ancestor; everyone closed here re-authenticates on reconnect.
+    const principals = [...new Set(lost.map((l) => l.principalId)), 'anonymous']
+    await docAdminCall(doc.id, '/admin/recheck', auth, { principalIds: principals })
+  }
+
   return json(docMeta({ ...doc, ...update }, auth.role))
 }
 
@@ -363,6 +406,40 @@ async function deleteDoc(db: Db, doc: DocRow, auth: AuthContext): Promise<Respon
   await docAdminCall(doc.id, '/admin/doc-deleted', auth)
   removeFromIndex(doc.id)
   return json({ ok: true })
+}
+
+/**
+ * POST /api/docs/:id/restore (SPEC §11 trash, vaults plan §1): bring a
+ * trashed doc back. The doc restores in place when its folder still exists;
+ * docs trashed from the pre-vault root (folder_id NULL) or whose folder is
+ * gone re-home into the owner's default vault. Either way the filename is
+ * re-checked against the target scope and suffixed like create — two trashed
+ * docs may share a name, so restore must never fail on a collision.
+ */
+async function restoreDoc(db: Db, doc: DocRow, auth: AuthContext): Promise<Response> {
+  if (doc.deletedAt === null) return json({ error: 'not-deleted' }, 409)
+
+  let folderId = doc.folderId
+  if (folderId !== null) {
+    const folder = (await db.select().from(folders).where(eq(folders.id, folderId)).limit(1))[0]
+    if (!folder) folderId = null
+  }
+  if (folderId === null) folderId = await ensureDefaultVault(db, doc.ownerUserId)
+
+  const taken = await takenFilenames(db, doc.ownerUserId, folderId, doc.id)
+  const filename = availableFilename(doc.filename !== '' ? doc.filename : 'untitled.md', taken)
+  const update = {
+    folderId,
+    filename,
+    title: docFilenameStem(filename), // legacy column stays coherent
+    deletedAt: null,
+    updatedAt: Date.now(),
+  }
+  await db.update(docs).set(update).where(eq(docs.id, doc.id))
+  // Deletion removed the doc from the search index; re-feed the title (the
+  // body re-indexes on the DO's next snapshot/save).
+  feedTitleToIndex(doc.id, docFilenameStem(filename))
+  return json(docMeta({ ...doc, ...update }, auth.role))
 }
 
 function docMeta(doc: DocRow, role: Role): DocMeta {
@@ -464,7 +541,7 @@ async function handleMembers(
   subPath: string,
   auth: AuthContext,
   targetType: 'doc' | 'folder',
-  target: { id: string; ownerUserId: string; title?: string; name?: string },
+  target: { id: string; ownerUserId: string; title?: string; name?: string; kind?: 'folder' | 'vault' },
 ): Promise<Response> {
   const table = targetType === 'doc' ? docMembers : folderMembers
   const targetColumn = targetType === 'doc' ? docMembers.docId : folderMembers.folderId
@@ -555,6 +632,8 @@ async function handleMembers(
         role,
         by: auth.principal.id,
         byName: auth.principal.name,
+        // Folder shares carry the folder kind so the UI can say "vault".
+        ...(targetType === 'folder' ? { kind: target.kind ?? 'folder' } : {}),
       })
     }
     return json({ principalId, principalType, role })
@@ -579,6 +658,16 @@ async function handleMembers(
 
 async function handleFolders(db: Db, request: Request, url: URL): Promise<Response> {
   const principal = await resolvePrincipal(request, db)
+
+  // The folder share-link landing surface (GET /api/folders/:id/listing) is
+  // the one folder read that admits anonymous callers — they ride a folder
+  // share token the way doc GETs do — so it sits before the auth gate.
+  const listingMatch = url.pathname.match(/^\/api\/folders\/([^/]+)\/listing$/)
+  if (listingMatch) {
+    if (request.method !== 'GET') return json({ error: 'method-not-allowed' }, 405)
+    return folderListing(db, listingMatch[1]!, principal, shareTokenFrom(url, request))
+  }
+
   if (!principal) return json({ error: 'unauthenticated' }, 401)
   const userId = effectiveUserId(principal)
   if (userId === null) return json({ error: 'forbidden' }, 403)
@@ -604,16 +693,13 @@ async function handleFolders(db: Db, request: Request, url: URL): Promise<Respon
 
   if (subPath === '/assets' || subPath.startsWith('/assets/')) {
     // Folder-role check (used by CLI pull/sync and the sidebar): owner or
-    // any folder member may list/download; uploads stay on the doc routes so
-    // role logic remains per-doc. Deletes additionally require editor+ on
-    // the folder (enforced inside, mirroring the doc-scoped delete).
-    if (!isOwner) {
-      const mine = await db
-        .select()
-        .from(folderMembers)
-        .where(and(eq(folderMembers.folderId, folder.id), inArray(folderMembers.principalId, ids)))
-      if (mine.length === 0) return json({ error: 'not-found' }, 404)
-    }
+    // any folder member may list/download — INHERITED grants included (a
+    // member granted on a vault root reads assets in every subfolder), so
+    // guard on the already-resolved folderRole, not a direct-membership
+    // lookup. Uploads stay on the doc routes so role logic remains per-doc;
+    // deletes additionally require editor+ on the folder (enforced inside,
+    // mirroring the doc-scoped delete).
+    if (folderRole === null) return json({ error: 'not-found' }, 404)
     return handleFolderAssets(db, asAppEnv(env).ASSETS, request, folder.id, subPath, folderRole)
   }
   if (subPath === '/share-links' || subPath.startsWith('/share-links/')) {
@@ -632,7 +718,7 @@ async function handleFolders(db: Db, request: Request, url: URL): Promise<Respon
       request,
       auth,
       'folder',
-      { id: folder.id, ownerUserId: folder.ownerUserId, title: folder.name },
+      { id: folder.id, ownerUserId: folder.ownerUserId, title: folder.name, kind: folder.kind },
       url.origin,
       emailEnv(),
     )
@@ -679,24 +765,91 @@ async function listFolders(db: Db, userId: string, ids: string[]): Promise<Respo
   return json({ folders: [...byId.values()] })
 }
 
-/** POST /api/folders: { name, parentId? } — parent must be caller-owned; depth-capped. */
+/**
+ * GET /api/folders/:id/listing — the share-link landing page's read (protocol
+ * §Folder share-link landing surface): the folder plus its ENTIRE live
+ * subtree (descendant folders + docs), in one response so the landing page
+ * navigates the subtree without further calls. Role = max(owner/member grants
+ * over the ancestor chain, share-link role) with the anonymous viewer cap —
+ * exactly the doc-route rules one level up. By construction nothing outside
+ * the requested folder's subtree is returned, and the token only validates
+ * when its target folder is on the requested folder's ancestor chain — a
+ * sibling folder 404s like any other invisible folder.
+ */
+async function folderListing(
+  db: Db,
+  folderId: string,
+  principal: Principal | null,
+  shareToken: string | null,
+): Promise<Response> {
+  const unauthorized = () =>
+    // Mirror the doc routes: bare anonymous gets 401 (sign-in prompt), anyone
+    // else gets 404 — never confirming the folder exists.
+    !principal && !shareToken ? json({ error: 'unauthenticated' }, 401) : json({ error: 'not-found' }, 404)
+
+  const folder = (await db.select().from(folders).where(eq(folders.id, folderId)).limit(1))[0]
+  if (!folder) return unauthorized()
+
+  const role = maxRole(
+    await resolveFolderRole(db, folder, principal),
+    await folderShareLinkRole(db, folder.id, principal, shareToken),
+  )
+  if (role === null) return unauthorized()
+
+  const subtree = await fetchFolderSubtrees(db, [folder.id])
+  const docRows = await db
+    .select()
+    .from(docs)
+    .where(
+      and(
+        inArray(
+          docs.folderId,
+          subtree.map((f) => f.id),
+        ),
+        isNull(docs.deletedAt),
+      ),
+    )
+  const body: FolderListingResponse = {
+    folder: folderMeta(folder, role),
+    folders: subtree.filter((f) => f.id !== folder.id).map((f) => folderMeta(f, role)),
+    docs: docRows.map((d) => docMeta(d, role)),
+  }
+  return json(body)
+}
+
+/**
+ * POST /api/folders: { name, parentId } — parent is REQUIRED (the root level
+ * holds only vaults; plain folders cannot root) and must be caller-owned with
+ * an ancestor chain terminating in a vault; depth-capped.
+ */
 async function createFolder(db: Db, request: Request, userId: string): Promise<Response> {
   const payload = await readJson<{ name?: unknown; parentId?: unknown }>(request)
   const name = typeof payload?.name === 'string' ? payload.name.trim() : ''
   if (name === '') return json({ error: 'bad-name' }, 400)
 
-  let parentId: string | null = null
-  if (payload?.parentId !== undefined && payload.parentId !== null && payload.parentId !== '') {
-    if (typeof payload.parentId !== 'string') return json({ error: 'bad-parent' }, 400)
-    const parent = (await db.select().from(folders).where(eq(folders.id, payload.parentId)).limit(1))[0]
-    if (!parent) return json({ error: 'parent-not-found' }, 404)
-    if (parent.ownerUserId !== userId) return json({ error: 'forbidden' }, 403)
-    const chain = await fetchAncestorChain(db, parent.id)
-    if (chain.length + 1 > MAX_FOLDER_DEPTH) return json({ error: 'too-deep' }, 400)
-    parentId = parent.id
+  if (payload?.parentId === undefined || payload.parentId === null || payload.parentId === '') {
+    return json({ error: 'parent-required' }, 400)
   }
+  if (typeof payload.parentId !== 'string') return json({ error: 'bad-parent' }, 400)
+  const parent = (await db.select().from(folders).where(eq(folders.id, payload.parentId)).limit(1))[0]
+  if (!parent) return json({ error: 'parent-not-found' }, 404)
+  if (parent.ownerUserId !== userId) return json({ error: 'forbidden' }, 403)
+  const chain = await fetchAncestorChain(db, parent.id)
+  if (chain.length + 1 > MAX_FOLDER_DEPTH) return json({ error: 'too-deep' }, 400)
+  // The chain must end at a vault (invariant: parent_id NULL ⟺ kind='vault')
+  // — a stray pre-backfill root folder is not a legal home for new children.
+  const rootId = chain[chain.length - 1]!
+  const root = parent.id === rootId ? parent : (await db.select().from(folders).where(eq(folders.id, rootId)).limit(1))[0]
+  if (!root || root.kind !== 'vault') return json({ error: 'vault-required' }, 400)
 
-  const folder = { id: crypto.randomUUID(), ownerUserId: userId, name, parentId, createdAt: Date.now() }
+  const folder = {
+    id: crypto.randomUUID(),
+    ownerUserId: userId,
+    name,
+    kind: 'folder' as const,
+    parentId: parent.id,
+    createdAt: Date.now(),
+  }
   await db.insert(folders).values(folder)
   return json(folderMeta(folder, 'owner'))
 }
@@ -726,21 +879,31 @@ async function patchFolder(
   if (payload.name !== undefined) {
     const name = typeof payload.name === 'string' ? payload.name.trim() : ''
     if (name === '') return json({ error: 'bad-name' }, 400)
+    // Vault names address vaults (CLI `--vault <name>`): keep them unique per
+    // owner, case-insensitively — mirrors the partial unique index so the
+    // rename fails 409 instead of a constraint error.
+    if (folder.kind === 'vault' && name.toLowerCase() !== folder.name.toLowerCase()) {
+      if (await vaultNameTaken(db, userId, name, folder.id)) return json({ error: 'name-taken' }, 409)
+    }
     update.name = name
   }
 
   if (payload.parentId !== undefined) {
+    // Vaults ARE the roots: they never move or nest (vaults plan §1).
+    if (folder.kind === 'vault') return json({ error: 'vault-immovable' }, 400)
+
     let newParentId: string | null
     if (payload.parentId === null || payload.parentId === '') newParentId = null
     else if (typeof payload.parentId === 'string') newParentId = payload.parentId
     else return json({ error: 'bad-parent' }, 400)
 
-    if (newParentId !== null) {
-      const parent = (await db.select().from(folders).where(eq(folders.id, newParentId)).limit(1))[0]
-      if (!parent) return json({ error: 'parent-not-found' }, 404)
-      // Trees stay single-owner: you may only nest under your own folders.
-      if (parent.ownerUserId !== userId) return json({ error: 'forbidden' }, 403)
-    }
+    // No new roots: the root level holds only vaults.
+    if (newParentId === null) return json({ error: 'vault-required' }, 400)
+
+    const parent = (await db.select().from(folders).where(eq(folders.id, newParentId)).limit(1))[0]
+    if (!parent) return json({ error: 'parent-not-found' }, 404)
+    // Trees stay single-owner: you may only nest under your own folders.
+    if (parent.ownerUserId !== userId) return json({ error: 'forbidden' }, 403)
     // Cycle + depth validation over the owner's full folder set (folder trees
     // are single-owner by construction, so this set contains the whole tree).
     const ownerFolders = await db
@@ -789,6 +952,12 @@ async function deleteFolder(
   userId: string,
   auth: AuthContext,
 ): Promise<Response> {
+  // Folder-delete semantics (promote children to the parent) would dump a
+  // vault's children at the now-illegal root. Vault deletion is a dedicated
+  // flow (subtree soft-delete, Phase 2's DELETE /api/vaults/:id) — until
+  // then a vault cannot be deleted at all.
+  if (folder.kind === 'vault') return json({ error: 'vault-undeletable' }, 400)
+
   const ownerFolders = await db
     .select({ id: folders.id, parentId: folders.parentId })
     .from(folders)
@@ -853,12 +1022,20 @@ async function deleteFolder(
 }
 
 function folderMeta(
-  folder: { id: string; name: string; parentId: string | null; ownerUserId: string; createdAt: number },
+  folder: {
+    id: string
+    name: string
+    kind: 'folder' | 'vault'
+    parentId: string | null
+    ownerUserId: string
+    createdAt: number
+  },
   role: Role,
 ): FolderMeta {
   return {
     id: folder.id,
     name: folder.name,
+    kind: folder.kind,
     parentId: folder.parentId,
     ownerUserId: folder.ownerUserId,
     role,
@@ -868,6 +1045,221 @@ function folderMeta(
 
 // folderGrantMap / fetchFolderSubtrees moved to roles.ts (shared with the
 // accessible-docs closure that /api/search reuses).
+
+// ---------------------------------------------------------------------------
+// Vaults (vaults plan §3): thin routes over the folders table that enforce
+// the vault invariants — a vault is a root folder (kind='vault'), named
+// uniquely per owner (case-insensitive), rename-only, and deletable only as
+// a whole subtree into the 30-day trash.
+// ---------------------------------------------------------------------------
+
+async function handleVaults(db: Db, request: Request, url: URL): Promise<Response> {
+  const principal = await resolvePrincipal(request, db)
+  if (!principal) return json({ error: 'unauthenticated' }, 401)
+  const userId = effectiveUserId(principal)
+  if (userId === null) return json({ error: 'forbidden' }, 403)
+  const ids = userId === principal.id ? [principal.id] : [principal.id, userId]
+
+  if (url.pathname === '/api/vaults') {
+    if (request.method === 'GET') return listVaults(db, userId, ids)
+    if (request.method === 'POST') return createVault(db, request, userId)
+    return json({ error: 'method-not-allowed' }, 405)
+  }
+
+  const match = url.pathname.match(/^\/api\/vaults\/([^/]+)$/)
+  if (!match) return json({ error: 'not-found' }, 404)
+  const vault = (
+    await db.select().from(folders).where(and(eq(folders.id, match[1]!), eq(folders.kind, 'vault'))).limit(1)
+  )[0]
+  if (!vault) return json({ error: 'not-found' }, 404)
+
+  if (request.method !== 'PATCH' && request.method !== 'DELETE') return json({ error: 'method-not-allowed' }, 405)
+  // Vault mutations are owner-only, like every folder mutation (members get
+  // the same 403 a folder PATCH gives them).
+  if (vault.ownerUserId !== userId) return json({ error: 'forbidden' }, 403)
+  if (request.method === 'PATCH') return renameVault(db, request, vault, userId)
+  return deleteVault(db, vault, userId, { principal, role: 'owner' })
+}
+
+/**
+ * GET /api/vaults: the caller's vault switcher list — owned vaults plus every
+ * vault the principal holds a DIRECT folder_members grant on (a grant on a
+ * subfolder shares that subtree, not the vault), with the effective role.
+ */
+async function listVaults(db: Db, userId: string, ids: string[]): Promise<Response> {
+  const byId = new Map<string, VaultMeta>()
+  const owned = await db
+    .select()
+    .from(folders)
+    .where(and(eq(folders.ownerUserId, userId), eq(folders.kind, 'vault')))
+  for (const v of owned) byId.set(v.id, vaultMeta(v, 'owner'))
+
+  const grantMap = await folderGrantMap(db, ids)
+  if (grantMap.size > 0) {
+    const granted = await db
+      .select()
+      .from(folders)
+      .where(and(inArray(folders.id, [...grantMap.keys()]), eq(folders.kind, 'vault')))
+    for (const v of granted) {
+      const role = grantMap.get(v.id)
+      if (!role) continue
+      const existing = byId.get(v.id)
+      byId.set(v.id, vaultMeta(v, existing ? (maxRole(existing.role, role) ?? role) : role))
+    }
+  }
+  // Oldest first: stable ordering for switchers, with the (usually oldest)
+  // default `Home` vault leading.
+  const vaults = [...byId.values()].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+  return json({ vaults })
+}
+
+/** POST /api/vaults: { name } — 409 `name-taken` mirrors the partial unique index. */
+async function createVault(db: Db, request: Request, userId: string): Promise<Response> {
+  const payload = await readJson<{ name?: unknown }>(request)
+  const name = typeof payload?.name === 'string' ? payload.name.trim() : ''
+  if (name === '') return json({ error: 'bad-name' }, 400)
+  if (await vaultNameTaken(db, userId, name)) return json({ error: 'name-taken' }, 409)
+
+  const vault = {
+    id: crypto.randomUUID(),
+    ownerUserId: userId,
+    name,
+    kind: 'vault' as const,
+    parentId: null,
+    createdAt: Date.now(),
+  }
+  await db.insert(folders).values(vault)
+  return json(vaultMeta(vault, 'owner'))
+}
+
+/**
+ * PATCH /api/vaults/:id: rename ONLY — vaults are the roots and never move
+ * (plan §1 invariants), so a parentId in the payload is rejected outright.
+ * Same case-insensitive 409 `name-taken` guard as the folder PATCH path.
+ */
+async function renameVault(
+  db: Db,
+  request: Request,
+  vault: typeof folders.$inferSelect,
+  userId: string,
+): Promise<Response> {
+  const payload = await readJson<{ name?: unknown; parentId?: unknown }>(request)
+  if (!payload || payload.name === undefined) return json({ error: 'bad-request' }, 400)
+  if (payload.parentId !== undefined) return json({ error: 'vault-immovable' }, 400)
+  const name = typeof payload.name === 'string' ? payload.name.trim() : ''
+  if (name === '') return json({ error: 'bad-name' }, 400)
+  if (name.toLowerCase() !== vault.name.toLowerCase() && (await vaultNameTaken(db, userId, name, vault.id))) {
+    return json({ error: 'name-taken' }, 409)
+  }
+  await db.update(folders).set({ name }).where(eq(folders.id, vault.id))
+  return json(vaultMeta({ ...vault, name }, 'owner'))
+}
+
+/**
+ * DELETE /api/vaults/:id — deliberately NOT folder-delete semantics (which
+ * promote children to the parent; for a vault that would dump content at the
+ * now-illegal root). Instead the ENTIRE subtree goes away: every live doc is
+ * soft-deleted into the 30-day trash (SPEC §11) and the subtree's folder rows
+ * are hard-deleted — restore (POST /api/docs/:id/restore) then re-homes a doc
+ * into the owner's default vault, which is exactly the Phase-1 missing-folder
+ * contract. Grants and share links on the deleted folders die with the rows.
+ *
+ * Guards (the UI surfaces both distinctly): the caller's LAST vault cannot be
+ * deleted (every doc needs a vault to land in), and neither can their default
+ * vault (createDoc-without-folderId and restore both target it).
+ */
+async function deleteVault(
+  db: Db,
+  vault: typeof folders.$inferSelect,
+  userId: string,
+  auth: AuthContext,
+): Promise<Response> {
+  const owned = await db
+    .select({ id: folders.id })
+    .from(folders)
+    .where(and(eq(folders.ownerUserId, userId), eq(folders.kind, 'vault')))
+  if (owned.length <= 1) return json({ error: 'last-vault' }, 400)
+  const pref = (await db.select().from(userPrefs).where(eq(userPrefs.userId, userId)).limit(1))[0]
+  if (pref?.defaultVaultId === vault.id) return json({ error: 'default-vault' }, 400)
+
+  // Snapshot the subtree BEFORE mutating: the folder closure and every live
+  // doc in it (those are the docs to trash and the DOs to tear down).
+  const subtree = await fetchFolderSubtrees(db, [vault.id])
+  const subtreeIds = subtree.map((f) => f.id)
+  const liveDocs = await db
+    .select({ id: docs.id })
+    .from(docs)
+    .where(and(inArray(docs.folderId, subtreeIds), isNull(docs.deletedAt)))
+
+  // One batch: trash the docs, drop the subtree's grants, then the folder
+  // rows children-before-parents (the parent_id self-FK has no ON DELETE
+  // action, so a parent must not outlive-in-reverse its children mid-batch).
+  const now = Date.now()
+  await db.batch([
+    db
+      .update(docs)
+      .set({ deletedAt: now, updatedAt: now })
+      .where(and(inArray(docs.folderId, subtreeIds), isNull(docs.deletedAt))),
+    db.delete(folderMembers).where(inArray(folderMembers.folderId, subtreeIds)),
+    ...subtreeDeleteLevels(subtree).map((levelIds) => db.delete(folders).where(inArray(folders.id, levelIds))),
+  ])
+
+  // Tear each doc down exactly like deleteDoc: the DO broadcasts
+  // {t:'doc-deleted'} and closes EVERY live connection (members and link
+  // visitors included — this subsumes a per-principal recheck fan-out), and
+  // the search index forgets the doc. Best-effort, like deleteDoc.
+  for (const doc of liveDocs) {
+    await docAdminCall(doc.id, '/admin/doc-deleted', auth)
+    removeFromIndex(doc.id)
+  }
+  return json({ ok: true })
+}
+
+/** Case-insensitive vault-name collision among the owner's vaults (mirrors the partial unique index). */
+async function vaultNameTaken(db: Db, userId: string, name: string, excludeId?: string): Promise<boolean> {
+  const vaults = await db
+    .select({ id: folders.id, name: folders.name })
+    .from(folders)
+    .where(and(eq(folders.ownerUserId, userId), eq(folders.kind, 'vault')))
+  return vaults.some((v) => v.id !== excludeId && v.name.toLowerCase() === name.toLowerCase())
+}
+
+/**
+ * Subtree folder ids grouped by depth, DEEPEST level first — the deletion
+ * order the folders.parent_id self-FK demands. Rows come from
+ * fetchFolderSubtrees, so the set is acyclic with the vault as its only root.
+ */
+function subtreeDeleteLevels(subtree: ReadonlyArray<{ id: string; parentId: string | null }>): string[][] {
+  const inSet = new Map(subtree.map((f) => [f.id, f]))
+  const depths = new Map<string, number>()
+  const depthOf = (id: string): number => {
+    const known = depths.get(id)
+    if (known !== undefined) return known
+    const row = inSet.get(id)
+    const depth = !row || row.parentId === null || !inSet.has(row.parentId) ? 0 : depthOf(row.parentId) + 1
+    depths.set(id, depth)
+    return depth
+  }
+  const levels: string[][] = []
+  for (const folder of subtree) {
+    const depth = depthOf(folder.id)
+    ;(levels[depth] ??= []).push(folder.id)
+  }
+  return levels.filter((l) => l.length > 0).reverse()
+}
+
+function vaultMeta(
+  vault: { id: string; name: string; ownerUserId: string; createdAt: number },
+  role: Role,
+): VaultMeta {
+  return {
+    id: vault.id,
+    name: vault.name,
+    ownerUserId: vault.ownerUserId,
+    role,
+    createdAt: vault.createdAt,
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Agents (Settings → Agents): mint returns the raw key exactly once.

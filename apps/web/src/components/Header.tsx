@@ -43,6 +43,8 @@ export default function Header() {
           <span className="display-title text-base font-bold tracking-tight">Glyphdown</span>
         </Link>
 
+        {/* The vault switcher lives in the file browser's heading (and the
+            sidebar's footer on doc routes), not here. */}
         <div className="ml-2 flex items-center gap-3 text-sm font-medium">
           <Link to="/" className="nav-link" activeProps={{ className: 'nav-link is-active' }} activeOptions={{ exact: true }}>
             Documents

@@ -14,7 +14,7 @@ Glyphdown is Google Docs for markdown files: real-time multiplayer editing, rang
 
 | Decision | Choice |
 |---|---|
-| Audience | Public product eventually; v1 = personal docs, link sharing, invites. **No teams/workspaces.** |
+| Audience | Public product eventually; v1 = personal docs, link sharing, invites. **No teams** — *vaults* (Obsidian-style root namespaces; every doc lives in exactly one, a whole vault is shareable at a role) are the workspace-shaped primitive (June 2026). |
 | Source of truth | Plain markdown text in Y.Text |
 | Editor | Obsidian-style **live preview** on CodeMirror 6 (not Milkdown/ProseMirror). True-WYSIWYG view possible later as an additive second editor. |
 | Suggestions | **Sidecar** anchored range-edits (not CriticMarkup in-file). Any editor can accept/reject. |
@@ -200,10 +200,14 @@ In suggest mode the editor wraps every local transaction: typed text becomes/ext
 
 ```
 glyphdown list [folder]               # docs you can access
+glyphdown vaults                      # vaults you own or that are shared with you (name, id, role)
 glyphdown cat <doc>                   # print markdown (working view) to stdout
-glyphdown pull <doc> [path]     # write doc.md + record base in .glyphdown/<docId>.json
+glyphdown clone [dir] [--vault v]     # mirror your account — or one vault (name|id) — into a workspace
+glyphdown sync [dir]                  # two-way mirror sync of a cloned/pulled workspace
+glyphdown pull <doc> [path]           # write doc.md + record base in .glyphdown/<docId>/
+glyphdown pull --folder <ref> [dir]   # pull a whole folder; <ref> is an id or name — vault refs work too
 glyphdown push [path] [--suggest] [--force] [-m note]
-glyphdown new <name> [--folder f]     # create doc named <slug-of-name>.md, prints id/url
+glyphdown new <name> [--folder f | --vault v]  # create doc named <slug-of-name>.md; neither flag → your default vault
 glyphdown mv <file> <new-name>        # rename a tracked doc: local file AND server filename, atomically
 glyphdown comments <doc>              # list open threads (text quotes + ids)
 glyphdown comment <doc> --reply <threadId> --body "..."   # reply; --resolve to resolve
@@ -213,6 +217,13 @@ glyphdown snapshot <doc> -m "msg"     # named version
 ```
 
 `<doc>` accepts a doc id, URL, or unique title prefix.
+
+Vault refs (`--vault`) resolve by id or case-insensitive name via `GET
+/api/vaults` (vault names are unique per owner; an owned/shared-name collision
+errors listing the candidate ids). `glyphdown clone --vault` writes the
+workspace root's `.glyphdown/folder.json` pointing at the vault's folder id —
+the exact layout `pull --folder` produces — so `glyphdown sync` confines
+itself to the vault's subtree with no extra workspace state.
 
 ### 8.3 Push merge algorithm (server-side, in the DO)
 

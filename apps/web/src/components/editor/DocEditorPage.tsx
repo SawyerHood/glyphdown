@@ -44,11 +44,13 @@ import {
   getDoc,
   listComments,
   listDocs,
+  listFolders,
   listMembers,
   listSuggestions,
   patchDoc,
   type SuggestionWithMeta,
 } from '../../lib/api.ts'
+import { docVaultId, vaultIdForFolder } from '../../lib/vaults.ts'
 import { imageUpload } from './imageUpload.ts'
 import { track } from '../../lib/analytics.ts'
 import { presenceColor } from '../../lib/presence.ts'
@@ -266,6 +268,16 @@ export function DocEditorPage({ docId, share }: { docId: string; share: string |
   const docsQuery = useQuery({
     queryKey: ['docs'],
     queryFn: listDocs,
+    staleTime: 30_000,
+    enabled: me !== null,
+    retry: false,
+  })
+  // Folders too: [[wiki links]] resolve IN-VAULT (vaults plan §4) — each
+  // doc's vault derives from its folder chain, so the candidate set below
+  // filters to this doc's vault. Same ['folders'] key as the rest of the app.
+  const foldersQuery = useQuery({
+    queryKey: ['folders'],
+    queryFn: listFolders,
     staleTime: 30_000,
     enabled: me !== null,
     retry: false,
@@ -595,10 +607,28 @@ export function DocEditorPage({ docId, share }: { docId: string; share: string |
   }, [ready, commentsQuery.data, suggestionsQuery.data, refreshAnnotations])
 
   // Keep wiki-link resolution in sync with the docs list and recompute chips.
+  // Candidates are SCOPED TO THIS DOC'S VAULT (vaults plan §4): a [[target]]
+  // resolves to the same-named doc in the linking doc's vault; a doc that
+  // only exists in another vault stays an unresolved (create-on-click) link,
+  // mirroring Obsidian. Docs with no derivable vault — direct shares out of
+  // someone else's tree — stay candidates everywhere (the quick switcher's
+  // rule), and a doc that itself has no derivable vault keeps the full list.
+  const metaFolderId = meta?.folderId ?? null
   useEffect(() => {
-    wikiDocsRef.current = (docsQuery.data ?? []).map((d) => ({ docId: d.id, title: d.title }))
+    const docs = docsQuery.data ?? []
+    const folders = foldersQuery.data
+    const vaultId =
+      metaFolderId !== null && folders !== undefined ? vaultIdForFolder(folders, metaFolderId) : null
+    const inScope =
+      vaultId === null
+        ? docs
+        : docs.filter((d) => {
+            const v = docVaultId(d, folders!)
+            return v === null || v === vaultId
+          })
+    wikiDocsRef.current = inScope.map((d) => ({ docId: d.id, title: d.title }))
     if (ready) editorRef.current?.view.dispatch({ effects: refreshWikiLinksEffect.of(null) })
-  }, [ready, docsQuery.data])
+  }, [ready, docsQuery.data, foldersQuery.data, metaFolderId])
 
   // Floating "Add comment" bubble next to the selection.
   useEffect(() => {
