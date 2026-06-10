@@ -257,11 +257,15 @@ export function docFilenameStem(filename: string): string {
 // ---------------------------------------------------------------------------
 // Search (global index DO behind the Worker)
 // ---------------------------------------------------------------------------
-// GET /api/search?q=<query>        -> { results: SearchResult[] }
+// GET /api/search?q=<query>[&vault=<vaultId>]  -> { results: SearchResult[] }
 //   Full-text search over every doc the caller can access (same accessible
 //   set as GET /api/docs, folder inheritance included). Titles come from D1.
+//   `vault` (optional) narrows to that vault's subtree BEFORE the result
+//   limit, so scoped searches aren't lossy; the caller must be able to see
+//   the vault (owner or a folder grant on/under it), else 404.
 // GET /api/docs/:id/backlinks      -> { docs: DocMeta[] }
-//   Docs (visible to the caller) whose bodies wiki-link [[this doc's title]].
+//   Docs (visible to the caller) whose bodies wiki-link [[this doc's title]],
+//   filtered to the linked doc's vault (wiki links resolve in-vault).
 
 export interface SearchResult {
   docId: string
@@ -317,6 +321,27 @@ export interface VaultMeta {
  * be 10 deep and gained a vault above them in the backfill.
  */
 export const MAX_FOLDER_DEPTH = 11
+
+// ---------------------------------------------------------------------------
+// Folder share-link landing surface
+// ---------------------------------------------------------------------------
+// GET /api/folders/:id/listing            -> FolderListingResponse
+//   The one folder-scoped read that accepts a share token (?share= /
+//   X-Glyphdown-Share) the way doc GETs do, so a folder/vault share link has
+//   a web landing page (/f/:folderId?share=<token>). The token must be an
+//   unrevoked folder link whose target is :id or one of its ancestors;
+//   anonymous visitors are capped at viewer (view-role links only), signed-in
+//   visitors get max(own grants, link role). Returns the folder plus its
+//   ENTIRE live subtree — never anything outside it.
+
+export interface FolderListingResponse {
+  /** The requested folder, with the caller's effective role. */
+  folder: FolderMeta
+  /** Every visible descendant folder (the requested folder excluded). */
+  folders: FolderMeta[]
+  /** Every live doc in the subtree (the requested folder included). */
+  docs: DocMeta[]
+}
 
 // ---------------------------------------------------------------------------
 // Assets (images stored in R2, scoped to a doc's folder — or the doc itself

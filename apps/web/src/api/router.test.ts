@@ -49,7 +49,9 @@ vi.mock('partyserver', async (importOriginal) => ({
         body = null
       }
       h.doCalls.push({ ns: ns.__ns, name, path: new URL(req.url).pathname, body })
-      return new Response(JSON.stringify({ ok: true, results: [] }), {
+      // One shape serves every stubbed DO: results for SearchDO /search,
+      // docIds for SearchDO /backlinks, ok for DocDO admin calls.
+      return new Response(JSON.stringify({ ok: true, results: [], docIds: [] }), {
         headers: { 'content-type': 'application/json' },
       })
     },
@@ -670,5 +672,177 @@ describe('DELETE /api/vaults/:id', () => {
     const meta = await jsonOf<DocMeta>(await api('/api/docs/d1/restore', { method: 'POST', headers }))
     expect(meta).toMatchObject({ folderId: 'v1', filename: 'notes-2.md' })
     expect(raw.prepare(`SELECT deleted_at FROM docs WHERE id = 'd1'`).get()).toEqual({ deleted_at: null })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Folder share-link landing surface (GET /api/folders/:id/listing) + folder
+// tokens on the doc routes
+// ---------------------------------------------------------------------------
+
+function seedShareLink(
+  token: string,
+  targetType: 'doc' | 'folder',
+  targetId: string,
+  role = 'viewer',
+  revokedAt: number | null = null,
+): void {
+  raw.prepare(
+    `INSERT INTO share_links (token, target_type, target_id, role, created_by, created_at, revoked_at)
+     VALUES (?, ?, ?, ?, 'alice', 1, ?)`,
+  ).run(token, targetType, targetId, role, revokedAt)
+}
+
+type Listing = { folder: FolderMeta; folders: FolderMeta[]; docs: DocMeta[] }
+
+/** alice's two vaults: v1 (sub + two docs) and a sibling v2 (one doc). */
+function seedSharedTree(): void {
+  principalFor('alice')
+  seedVault('v1', 'alice')
+  seedVault('v2', 'alice', 'Work')
+  seedFolder('sub', 'alice', 'v1', 'Research')
+  seedDoc('d-a', 'alice', 'alpha.md', 'v1')
+  seedDoc('d-b', 'alice', 'beta.md', 'sub')
+  seedDoc('d-c', 'alice', 'gamma.md', 'v2')
+}
+
+describe('GET /api/folders/:id/listing', () => {
+  it('lets an anonymous visitor with a vault view link read the whole subtree, viewer-capped', async () => {
+    seedSharedTree()
+    seedShareLink('tok-v1', 'folder', 'v1')
+
+    const listing = await jsonOf<Listing>(await api('/api/folders/v1/listing?share=tok-v1'))
+    expect(listing.folder).toMatchObject({ id: 'v1', name: 'Home', kind: 'vault', role: 'viewer' })
+    expect(listing.folders.map((f) => f.id)).toEqual(['sub'])
+    expect(listing.docs.map((d) => d.id).sort()).toEqual(['d-a', 'd-b'])
+    expect(listing.docs.every((d) => d.role === 'viewer')).toBe(true)
+  })
+
+  it('admits the token on any folder INSIDE the link target (navigating into a subfolder)', async () => {
+    seedSharedTree()
+    seedShareLink('tok-v1', 'folder', 'v1')
+    const listing = await jsonOf<Listing>(await api('/api/folders/sub/listing?share=tok-v1'))
+    expect(listing.folder.id).toBe('sub')
+    expect(listing.docs.map((d) => d.id)).toEqual(['d-b'])
+  })
+
+  it('never lets the token escape its subtree (sibling vault folder and doc both 404)', async () => {
+    seedSharedTree()
+    seedShareLink('tok-v1', 'folder', 'v1')
+    expect((await api('/api/folders/v2/listing?share=tok-v1'))!.status).toBe(404)
+    expect((await api('/api/docs/d-c?share=tok-v1'))!.status).toBe(404)
+  })
+
+  it('grants anonymous DOC access through the folder token (the landing page opens docs)', async () => {
+    seedSharedTree()
+    seedShareLink('tok-v1', 'folder', 'v1')
+    const meta = await jsonOf<DocMeta>(await api('/api/docs/d-b?share=tok-v1'))
+    expect(meta).toMatchObject({ id: 'd-b', role: 'viewer' })
+  })
+
+  it('treats a revoked token exactly like no access (404), and bare anonymous as 401', async () => {
+    seedSharedTree()
+    seedShareLink('tok-dead', 'folder', 'v1', 'viewer', 999)
+    expect((await api('/api/folders/v1/listing?share=tok-dead'))!.status).toBe(404)
+    expect((await api('/api/docs/d-a?share=tok-dead'))!.status).toBe(404)
+    expect((await api('/api/folders/v1/listing'))!.status).toBe(401)
+    expect((await api('/api/folders/nope/listing?share=tok-dead'))!.status).toBe(404)
+  })
+
+  it('caps anonymous visitors at viewer: a comment+ link grants them nothing (404, like docs)', async () => {
+    seedSharedTree()
+    seedShareLink('tok-edit', 'folder', 'v1', 'editor')
+    expect((await api('/api/folders/v1/listing?share=tok-edit'))!.status).toBe(404)
+  })
+
+  it('gives a signed-in visitor the link role (and an existing member the max of both)', async () => {
+    seedSharedTree()
+    const bob = principalFor('bob')
+    seedShareLink('tok-edit', 'folder', 'v1', 'editor')
+
+    const viaLink = await jsonOf<Listing>(await api('/api/folders/v1/listing?share=tok-edit', { headers: bob }))
+    expect(viaLink.folder.role).toBe('editor')
+
+    // Their own grant outranks a weaker link.
+    seedShareLink('tok-view', 'folder', 'v1', 'viewer')
+    grantFolder('v1', 'bob', 'suggester')
+    const viaBoth = await jsonOf<Listing>(await api('/api/folders/v1/listing?share=tok-view', { headers: bob }))
+    expect(viaBoth.folder.role).toBe('suggester')
+  })
+
+  it('works tokenless for the owner (role owner) and 404s for a stranger', async () => {
+    seedSharedTree()
+    const alice = principalFor('alice')
+    const eve = principalFor('eve')
+    const listing = await jsonOf<Listing>(await api('/api/folders/v1/listing', { headers: alice }))
+    expect(listing.folder.role).toBe('owner')
+    expect((await api('/api/folders/v1/listing', { headers: eve }))!.status).toBe(404)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Vault-scoped search + backlinks (vaults plan §4)
+// ---------------------------------------------------------------------------
+
+describe('GET /api/search?vault=', () => {
+  const searchCalls = () => h.doCalls.filter((c) => c.ns === 'SearchDO' && c.path === '/search')
+
+  it('narrows allowedDocIds to the vault subtree BEFORE the search (pre-truncation)', async () => {
+    seedSharedTree()
+    const alice = principalFor('alice')
+    expect((await api('/api/search?q=hello&vault=v1', { headers: alice }))!.status).toBe(200)
+    const call = searchCalls().at(-1)!.body as { allowedDocIds: string[] }
+    expect([...call.allowedDocIds].sort()).toEqual(['d-a', 'd-b'])
+  })
+
+  it('keeps the unscoped closure when the param is absent', async () => {
+    seedSharedTree()
+    const alice = principalFor('alice')
+    expect((await api('/api/search?q=hello', { headers: alice }))!.status).toBe(200)
+    const call = searchCalls().at(-1)!.body as { allowedDocIds: string[] }
+    expect([...call.allowedDocIds].sort()).toEqual(['d-a', 'd-b', 'd-c'])
+  })
+
+  it('404s when the caller cannot see the vault (or it is not a vault) — and never queries the index', async () => {
+    seedSharedTree()
+    const eve = principalFor('eve')
+    const alice = principalFor('alice')
+    expect((await api('/api/search?q=hello&vault=v1', { headers: eve }))!.status).toBe(404)
+    expect((await api('/api/search?q=hello&vault=sub', { headers: alice }))!.status).toBe(404)
+    expect((await api('/api/search?q=hello&vault=ghost', { headers: alice }))!.status).toBe(404)
+    expect(searchCalls()).toHaveLength(0)
+  })
+
+  it('lets a vault member search their shared vault', async () => {
+    seedSharedTree()
+    const bob = principalFor('bob')
+    grantFolder('v1', 'bob', 'viewer')
+    expect((await api('/api/search?q=hello&vault=v1', { headers: bob }))!.status).toBe(200)
+    const call = searchCalls().at(-1)!.body as { allowedDocIds: string[] }
+    expect([...call.allowedDocIds].sort()).toEqual(['d-a', 'd-b'])
+  })
+})
+
+describe('GET /api/docs/:id/backlinks vault scoping', () => {
+  const backlinkCalls = () => h.doCalls.filter((c) => c.ns === 'SearchDO' && c.path === '/backlinks')
+
+  it('filters candidate docs to the linked doc\'s vault', async () => {
+    seedSharedTree()
+    const alice = principalFor('alice')
+    expect((await api('/api/docs/d-a/backlinks', { headers: alice }))!.status).toBe(200)
+    const call = backlinkCalls().at(-1)!.body as { allowedDocIds: string[] }
+    expect([...call.allowedDocIds].sort()).toEqual(['d-a', 'd-b'])
+  })
+
+  it('keeps the full closure for a doc with no derivable vault (pre-backfill plain-folder root)', async () => {
+    seedSharedTree()
+    const alice = principalFor('alice')
+    raw.prepare(
+      `INSERT INTO folders (id, owner_user_id, name, kind, parent_id, created_at) VALUES ('legacy', 'alice', 'Legacy', 'folder', NULL, 1)`,
+    ).run()
+    seedDoc('d-l', 'alice', 'legacy.md', 'legacy')
+    expect((await api('/api/docs/d-l/backlinks', { headers: alice }))!.status).toBe(200)
+    const call = backlinkCalls().at(-1)!.body as { allowedDocIds: string[] }
+    expect([...call.allowedDocIds].sort()).toEqual(['d-a', 'd-b', 'd-c', 'd-l'])
   })
 })

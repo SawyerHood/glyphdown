@@ -1,7 +1,7 @@
 import { env, waitUntil } from 'cloudflare:workers'
 import { getServerByName, type Server } from 'partyserver'
 import { and, desc, eq, inArray, isNull, ne } from 'drizzle-orm'
-import { docFilenameStem, type DocMeta, type FolderMeta, type Principal, type PushResponse, type Role, type VaultMeta } from '@glyphdown/protocol'
+import { docFilenameStem, type DocMeta, type FolderListingResponse, type FolderMeta, type Principal, type PushResponse, type Role, type VaultMeta } from '@glyphdown/protocol'
 import { HEADER_COMMENT_AUTHOR } from '@glyphdown/sync'
 import { asAppEnv } from '../env.ts'
 import { createDb, type Db } from '../db/client.ts'
@@ -18,6 +18,7 @@ import {
   fetchAncestorChain,
   fetchFolderSubtrees,
   folderGrantMap,
+  folderShareLinkRole,
   maxRole,
   resolveDocAccess,
   resolveFolderRole,
@@ -657,6 +658,16 @@ async function handleMembers(
 
 async function handleFolders(db: Db, request: Request, url: URL): Promise<Response> {
   const principal = await resolvePrincipal(request, db)
+
+  // The folder share-link landing surface (GET /api/folders/:id/listing) is
+  // the one folder read that admits anonymous callers — they ride a folder
+  // share token the way doc GETs do — so it sits before the auth gate.
+  const listingMatch = url.pathname.match(/^\/api\/folders\/([^/]+)\/listing$/)
+  if (listingMatch) {
+    if (request.method !== 'GET') return json({ error: 'method-not-allowed' }, 405)
+    return folderListing(db, listingMatch[1]!, principal, shareTokenFrom(url, request))
+  }
+
   if (!principal) return json({ error: 'unauthenticated' }, 401)
   const userId = effectiveUserId(principal)
   if (userId === null) return json({ error: 'forbidden' }, 403)
@@ -752,6 +763,58 @@ async function listFolders(db: Db, userId: string, ids: string[]): Promise<Respo
     }
   }
   return json({ folders: [...byId.values()] })
+}
+
+/**
+ * GET /api/folders/:id/listing — the share-link landing page's read (protocol
+ * §Folder share-link landing surface): the folder plus its ENTIRE live
+ * subtree (descendant folders + docs), in one response so the landing page
+ * navigates the subtree without further calls. Role = max(owner/member grants
+ * over the ancestor chain, share-link role) with the anonymous viewer cap —
+ * exactly the doc-route rules one level up. By construction nothing outside
+ * the requested folder's subtree is returned, and the token only validates
+ * when its target folder is on the requested folder's ancestor chain — a
+ * sibling folder 404s like any other invisible folder.
+ */
+async function folderListing(
+  db: Db,
+  folderId: string,
+  principal: Principal | null,
+  shareToken: string | null,
+): Promise<Response> {
+  const unauthorized = () =>
+    // Mirror the doc routes: bare anonymous gets 401 (sign-in prompt), anyone
+    // else gets 404 — never confirming the folder exists.
+    !principal && !shareToken ? json({ error: 'unauthenticated' }, 401) : json({ error: 'not-found' }, 404)
+
+  const folder = (await db.select().from(folders).where(eq(folders.id, folderId)).limit(1))[0]
+  if (!folder) return unauthorized()
+
+  const role = maxRole(
+    await resolveFolderRole(db, folder, principal),
+    await folderShareLinkRole(db, folder.id, principal, shareToken),
+  )
+  if (role === null) return unauthorized()
+
+  const subtree = await fetchFolderSubtrees(db, [folder.id])
+  const docRows = await db
+    .select()
+    .from(docs)
+    .where(
+      and(
+        inArray(
+          docs.folderId,
+          subtree.map((f) => f.id),
+        ),
+        isNull(docs.deletedAt),
+      ),
+    )
+  const body: FolderListingResponse = {
+    folder: folderMeta(folder, role),
+    folders: subtree.filter((f) => f.id !== folder.id).map((f) => folderMeta(f, role)),
+    docs: docRows.map((d) => docMeta(d, role)),
+  }
+  return json(body)
 }
 
 /**

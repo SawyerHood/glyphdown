@@ -2,10 +2,12 @@ import { env, waitUntil } from 'cloudflare:workers'
 import { getServerByName, type Server } from 'partyserver'
 import { docFilenameStem, type DocMeta, type Principal, type Role, type SearchResult } from '@glyphdown/protocol'
 import { SEARCH_DO_NAME, normalizeWikiTarget, type SearchResponse } from '@glyphdown/sync'
+import { and, eq } from 'drizzle-orm'
 import { asAppEnv } from '../env.ts'
 import type { Db } from '../db/client.ts'
+import { folders } from '../db/schema.ts'
 import { trustedHeaders } from './auth.ts'
-import { accessibleDocs, type DocRow } from './roles.ts'
+import { accessibleDocs, resolveFolderRole, sameVaultDocIds, type DocRow } from './roles.ts'
 
 /**
  * Worker side of the search surface (SPEC addendum; index lives in the single
@@ -50,24 +52,46 @@ async function callSearchDO<T>(path: '/index' | '/remove' | '/search' | '/backli
 // Public handlers (wired in router.ts)
 // ---------------------------------------------------------------------------
 
-/** GET /api/search?q=… -> { results: SearchResult[] } */
+/** GET /api/search?q=…[&vault=<vaultId>] -> { results: SearchResult[] } */
 export async function handleSearch(db: Db, url: URL, principal: Principal): Promise<Response> {
   const access = await accessibleDocs(db, principal)
   if (access === null) return json({ error: 'forbidden' }, 403)
+
+  // Optional vault scope (vaults plan §4): intersect the accessible closure
+  // with the vault's subtree doc-id closure BEFORE the search/limit, so a
+  // scoped search ranks/truncates over in-vault docs only (a client-side
+  // filter after truncation would lose hits). The caller must be able to SEE
+  // the vault — owner or any folder grant on/under it — else 404 (no
+  // existence leak, matching the folder routes).
+  let allowed = access
+  const vaultId = url.searchParams.get('vault')
+  if (vaultId !== null && vaultId !== '') {
+    const vault = (
+      await db.select().from(folders).where(and(eq(folders.id, vaultId), eq(folders.kind, 'vault'))).limit(1)
+    )[0]
+    if (!vault || (await resolveFolderRole(db, vault, principal)) === null) {
+      return json({ error: 'not-found' }, 404)
+    }
+    const inVault = await sameVaultDocIds(db, { folderId: vault.id })
+    allowed = new Map([...access].filter(([id]) => inVault?.has(id)))
+  }
+
   const q = (url.searchParams.get('q') ?? '').trim()
-  if (q === '' || access.size === 0) return json({ results: [] })
+  if (q === '' || allowed.size === 0) return json({ results: [] })
 
   const data = await callSearchDO<SearchResponse>('/search', {
     query: q,
-    allowedDocIds: [...access.keys()],
+    allowedDocIds: [...allowed.keys()],
     limit: SEARCH_LIMIT,
   })
+  // Cold-index backfill always works over the FULL accessible set — the
+  // vault scope only narrows this query, not what gets indexed.
   if (data.coldIndex) waitUntil(backfillIndex(access))
 
   // D1 is the name source of truth — the index copy may trail a rename. The
   // displayed "title" is always the filename stem (filesystem model).
   const results: SearchResult[] = data.results.map((r) => {
-    const hit = access.get(r.docId)
+    const hit = allowed.get(r.docId)
     return { ...r, title: hit ? stemOf(hit.doc) : r.title }
   })
   return json({ results })
@@ -75,23 +99,32 @@ export async function handleSearch(db: Db, url: URL, principal: Principal): Prom
 
 /**
  * GET /api/docs/:id/backlinks -> { docs: DocMeta[] } — docs whose bodies
- * contain [[<this doc's title>]], visible to the caller. Anonymous share-link
- * visitors have no doc closure beyond the shared doc, so they get [].
+ * contain [[<this doc's title>]], visible to the caller AND in the same vault
+ * as this doc (wiki links resolve in-vault, vaults plan §4 — a same-named doc
+ * in another vault is a different namespace). Docs with no derivable vault
+ * keep the unscoped behavior. Anonymous share-link visitors have no doc
+ * closure beyond the shared doc, so they get [].
  */
 export async function handleBacklinks(db: Db, doc: DocRow, principal: Principal | null): Promise<Response> {
   if (!principal || principal.id === 'anonymous') return json({ docs: [] })
   const access = await accessibleDocs(db, principal)
   if (access === null) return json({ docs: [] })
 
+  // SearchDO stays vault-agnostic (doc-id keyed index); the vault scope is
+  // applied here by narrowing allowedDocIds to the doc's vault closure.
+  const inVault = await sameVaultDocIds(db, doc)
+  const allowed = inVault === null ? access : new Map([...access].filter(([id]) => inVault.has(id)))
+  if (allowed.size === 0) return json({ docs: [] })
+
   const { docIds } = await callSearchDO<{ docIds: string[] }>('/backlinks', {
     // Wiki-link targets resolve against filename stems; normalizeWikiTarget
     // slugifies both sides, so old [[Title With Spaces]] links still hit.
     titleNorm: normalizeWikiTarget(stemOf(doc)),
-    allowedDocIds: [...access.keys()],
+    allowedDocIds: [...allowed.keys()],
   })
   const docs: DocMeta[] = []
   for (const id of docIds) {
-    const hit = access.get(id)
+    const hit = allowed.get(id)
     if (hit) docs.push(toDocMeta(hit.doc, hit.role))
   }
   return json({ docs })

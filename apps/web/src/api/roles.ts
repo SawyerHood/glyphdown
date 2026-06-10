@@ -216,6 +216,50 @@ export async function resolveFolderRole(
   return role
 }
 
+/**
+ * The role a share token confers on a FOLDER: the token must be an unrevoked
+ * folder link whose target is the folder itself or any ancestor (links
+ * inherit down the tree exactly like grants — same rule computeDocRole
+ * applies to docs). Anonymous callers are capped the way doc links cap them:
+ * only a view-role link grants anything, and it grants `viewer`.
+ */
+export async function folderShareLinkRole(
+  db: Db,
+  folderId: string,
+  principal: Principal | null,
+  shareToken: string | null,
+): Promise<Role | null> {
+  if (!shareToken) return null
+  const link = (await db.select().from(shareLinks).where(eq(shareLinks.token, shareToken)).limit(1))[0]
+  if (!link || link.revokedAt !== null || link.targetType !== 'folder') return null
+  const chain = await fetchAncestorChain(db, folderId)
+  if (!chain.includes(link.targetId)) return null
+  if (principal) return link.role
+  return link.role === 'viewer' ? 'viewer' : null
+}
+
+/**
+ * The doc-id closure of `doc`'s VAULT: ids of every live doc in the same
+ * vault subtree. Null when the doc has no derivable vault (folderless, or a
+ * root chain that tops out at a pre-backfill plain folder) — callers treat
+ * null as "no vault scoping applies".
+ */
+export async function sameVaultDocIds(db: Db, doc: Pick<DocRow, 'folderId'>): Promise<Set<string> | null> {
+  if (doc.folderId === null) return null
+  const chain = await fetchAncestorChain(db, doc.folderId)
+  if (chain.length === 0) return null
+  const rootId = chain[chain.length - 1]!
+  const root = (await db.select().from(folders).where(eq(folders.id, rootId)).limit(1))[0]
+  if (!root || root.kind !== 'vault') return null
+  const subtree = await fetchFolderSubtrees(db, [root.id])
+  const folderIds = subtree.map((f) => f.id)
+  const rows = await db
+    .select({ id: docs.id })
+    .from(docs)
+    .where(and(inArray(docs.folderId, folderIds), isNull(docs.deletedAt)))
+  return new Set(rows.map((r) => r.id))
+}
+
 export function principalIds(principal: Principal | null): string[] {
   if (!principal) return []
   const ids = [principal.id]
