@@ -140,6 +140,8 @@ describe('glyphdown sync (mirror workspace)', () => {
 
     const created = results.filter((r) => r.action === 'created')
     expect(created).toHaveLength(2)
+    // Every created doc reports its web URL, same /d/<id> shape as `glyphdown new`.
+    for (const r of created) expect(r.message).toContain(`${SERVER}/d/${r.docId}`)
 
     const all = [...state.docs.values()].map((d) => d.meta)
     // The H1 heading ("Q3 Retro") is content — the doc is named retro.md.
@@ -166,6 +168,18 @@ describe('glyphdown sync (mirror workspace)', () => {
     expect(second.every((r) => r.action === 'up-to-date')).toBe(true)
   })
 
+  it('prints the doc URL on the human-readable line for docs created during sync', async () => {
+    const state = nestedAccount()
+    const { root, h } = await cloned(state)
+
+    writeFileSync(join(root, 'scratch-pad.md'), 'no heading here\n')
+    await h.run(['sync', root])
+
+    const scratch = [...state.docs.values()].find((d) => d.meta.filename === 'scratch-pad.md')!
+    const line = h.lines.find((l) => l.includes('scratch-pad.md') && l.includes('created'))
+    expect(line).toContain(`${SERVER}/d/${scratch.meta.id}`)
+  })
+
   it('creates server folders (with the right parentId) from new local dirs and skips empty ones', async () => {
     const state = nestedAccount()
     const { root, h } = await cloned(state)
@@ -179,6 +193,8 @@ describe('glyphdown sync (mirror workspace)', () => {
 
     const folderCreated = results.filter((r) => r.action === 'folder-created')
     expect(folderCreated.map((r) => r.file).sort()).toEqual(['team/archive/', 'team/archive/old/'])
+    // Created folders report their /f/<folderId> share-link URL.
+    for (const r of folderCreated) expect(r.message).toBe(`${SERVER}/f/${r.docId}`)
 
     const archive = state.folders.find((f) => f.name === 'archive')!
     const old = state.folders.find((f) => f.name === 'old')!
