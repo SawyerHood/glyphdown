@@ -99,7 +99,13 @@ function setupDb(): Db {
     CREATE TABLE user_prefs (user_id TEXT PRIMARY KEY, email_notifications INTEGER NOT NULL DEFAULT 1,
       default_vault_id TEXT);
   `)
-  return drizzle(sqlite) as unknown as Db
+  const db = drizzle(sqlite) as unknown as Db
+  // The better-sqlite3 driver lacks D1's batch — run the queries in order
+  // (each drizzle query builder is a thenable).
+  ;(db as unknown as { batch: (queries: Array<PromiseLike<unknown>>) => Promise<void> }).batch = async (queries) => {
+    for (const q of queries) await q
+  }
+  return db
 }
 
 let raw: ReturnType<typeof rawDb>
@@ -281,6 +287,20 @@ describe('folder vault invariants', () => {
     const res = await api('/api/folders/f1', { method: 'PATCH', headers, body: JSON.stringify({ parentId: null }) })
     expect(res!.status).toBe(400)
     expect(await jsonOf<{ error: string }>(res)).toEqual({ error: 'vault-required' })
+  })
+
+  it('DELETE /api/folders/:id refuses vaults (promote-to-root would break the invariant)', async () => {
+    const headers = principalFor('alice')
+    seedVault('v1', 'alice')
+    seedFolder('f1', 'alice', 'v1')
+    seedDoc('d1', 'alice', 'a.md', 'f1')
+    const res = await api('/api/folders/v1', { method: 'DELETE', headers })
+    expect(res!.status).toBe(400)
+    expect(await jsonOf<{ error: string }>(res)).toEqual({ error: 'vault-undeletable' })
+    // Plain folder deletes still promote into the vault.
+    const ok = await api('/api/folders/f1', { method: 'DELETE', headers })
+    expect(ok!.status).toBe(200)
+    expect(raw.prepare(`SELECT folder_id FROM docs WHERE id = 'd1'`).get()).toEqual({ folder_id: 'v1' })
   })
 
   it('still allows legal folder moves (vault → vault is just a re-parent)', async () => {

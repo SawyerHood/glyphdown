@@ -184,7 +184,9 @@ export type ClientMessage = { t: 'suggestion-upsert'; suggestion: SuggestionReco
 //                                                (move = owner-only; 400 `cycle` / `too-deep` on violation;
 //                                                vaults cannot move at all and plain folders cannot move to
 //                                                root — `parentId: null` is rejected with 400)
-// DELETE /api/folders/:id                     -> { ok } (child folders + docs promote to the deleted folder's parent)
+// DELETE /api/folders/:id                     -> { ok } (child folders + docs promote to the deleted folder's
+//                                                parent; vaults are refused — 400 `vault-undeletable` — until the
+//                                                dedicated vault-delete flow lands)
 // ...comments/suggestions/versions proxied through to the DO surface above.
 
 export interface DocMeta {

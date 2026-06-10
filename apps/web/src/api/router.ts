@@ -889,6 +889,12 @@ async function deleteFolder(
   userId: string,
   auth: AuthContext,
 ): Promise<Response> {
+  // Folder-delete semantics (promote children to the parent) would dump a
+  // vault's children at the now-illegal root. Vault deletion is a dedicated
+  // flow (subtree soft-delete, Phase 2's DELETE /api/vaults/:id) — until
+  // then a vault cannot be deleted at all.
+  if (folder.kind === 'vault') return json({ error: 'vault-undeletable' }, 400)
+
   const ownerFolders = await db
     .select({ id: folders.id, parentId: folders.parentId })
     .from(folders)
