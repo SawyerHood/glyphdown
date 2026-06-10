@@ -212,6 +212,8 @@ describe('event registry', () => {
       'sign_in',
       'doc_created',
       'folder_created',
+      'vault_created',
+      'vault_deleted',
       'doc_opened',
       'doc_shared',
       'invite_sent',

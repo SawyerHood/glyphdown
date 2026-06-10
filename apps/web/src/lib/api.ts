@@ -10,6 +10,7 @@ import type {
   SearchResult,
   SuggestionRecord,
   UploadAssetResponse,
+  VaultMeta,
   VersionMeta,
 } from '@glyphdown/protocol'
 
@@ -174,7 +175,7 @@ export const deleteDoc = (id: string) => request<{ ok: true }>(doc(id), { method
 
 export const listFolders = () => request<{ folders: FolderInfo[] }>('/api/folders').then((r) => r.folders)
 
-/** Accepts a bare name (root folder) or { name, parentId } to nest. */
+/** { name, parentId } — a parent is REQUIRED now (the root level holds only vaults; the server 400s without one). */
 export const createFolder = (input: string | { name: string; parentId?: string | null }) => {
   const body =
     typeof input === 'string'
@@ -183,7 +184,7 @@ export const createFolder = (input: string | { name: string; parentId?: string |
   return request<FolderInfo>('/api/folders', { method: 'POST', body })
 }
 
-/** Rename and/or move (parentId: null = move to root). Owner-only; moves are cycle/depth-guarded server-side. */
+/** Rename and/or move. Owner-only; moves are cycle/depth-guarded server-side, parentId null is rejected (no new roots). */
 export const updateFolder = (id: string, input: { name?: string; parentId?: string | null }) =>
   request<FolderInfo>(`/api/folders/${encodeURIComponent(id)}`, { method: 'PATCH', body: input })
 
@@ -193,6 +194,21 @@ export const moveFolder = (id: string, parentId: string | null) => updateFolder(
 
 export const deleteFolder = (id: string) =>
   request<{ ok: true }>(`/api/folders/${encodeURIComponent(id)}`, { method: 'DELETE' })
+
+// ---------------------------------------------------------------------------
+// Vaults (root namespaces — see protocol VaultMeta; the switcher derives its
+// list from ['folders'], these are the mutation routes)
+// ---------------------------------------------------------------------------
+
+/** 409 `name-taken` on a case-insensitive collision with another of your vaults. */
+export const createVault = (name: string) => request<VaultMeta>('/api/vaults', { method: 'POST', body: { name } })
+
+/**
+ * Owner-only. The whole subtree goes to the 30-day trash; 400 `last-vault` /
+ * `default-vault` protect the only and the default vault — surface both.
+ */
+export const deleteVault = (id: string) =>
+  request<{ ok: true }>(`/api/vaults/${encodeURIComponent(id)}`, { method: 'DELETE' })
 
 // ---------------------------------------------------------------------------
 // Search & backlinks
@@ -231,6 +247,23 @@ export const createShareLink = (docId: string, role: Role) =>
 export const revokeShareLink = (docId: string, token: string) =>
   request<{ ok: true }>(doc(docId, `/share-links/${encodeURIComponent(token)}`), { method: 'DELETE' })
 
+// Folder-scoped sharing (the vault share dialog): same member model as docs,
+// one level up — a grant on a vault root covers its entire subtree.
+
+const folderPath = (id: string, sub = '') => `/api/folders/${encodeURIComponent(id)}${sub}`
+
+export const listFolderMembers = (folderId: string) =>
+  request<{ members: MemberInfo[] }>(folderPath(folderId, '/members')).then((r) => r.members)
+
+export const addFolderMember = (folderId: string, input: { email?: string; agentId?: string; role: Role }) =>
+  request<{ principalId: string; principalType: string; role: Role }>(folderPath(folderId, '/members'), {
+    method: 'POST',
+    body: input,
+  })
+
+export const removeFolderMember = (folderId: string, principalId: string) =>
+  request<{ ok: true }>(folderPath(folderId, `/members/${encodeURIComponent(principalId)}`), { method: 'DELETE' })
+
 // ---------------------------------------------------------------------------
 // Email invites (work for non-users too — they get an /invite/<token> email)
 // ---------------------------------------------------------------------------
@@ -260,6 +293,8 @@ export interface PendingInvite {
 
 export interface PublicInvite {
   targetType: 'doc' | 'folder'
+  /** Copy noun — 'vault' for folder invites whose folder is a vault root. */
+  targetKind: 'doc' | 'folder' | 'vault'
   targetName: string
   inviterName: string
   role: Role

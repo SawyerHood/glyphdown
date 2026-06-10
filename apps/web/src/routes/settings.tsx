@@ -280,7 +280,8 @@ function describeNotification(type: string, payload: Record<string, unknown> | n
     case 'doc-shared':
       return `${byName} shared “${title}” with you`
     case 'folder-shared':
-      return `${byName} shared the folder “${title}” with you`
+      // Vault shares (folder targets whose folder is a vault root) say "vault".
+      return `${byName} shared the ${p['kind'] === 'vault' ? 'vault' : 'folder'} “${title}” with you`
     case 'comment-reply':
       return `${byName} replied to your comment in “${title}”`
     case 'invite-accepted': {

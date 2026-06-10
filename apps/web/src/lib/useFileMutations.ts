@@ -34,9 +34,9 @@ export interface FileMutations {
   createFolderIn: (name: string, parentId: string | null) => void
   renameDocTo: (id: string, name: string) => void
   renameFolderTo: (id: string, name: string) => void
-  /** Move a doc into a folder (null = root). No-op when same scope or not owner. */
+  /** Move a doc into a folder. No-op when same scope, not owner, or no target (docs never leave their vault for root). */
   moveDocTo: (docId: string, folderId: string | null) => void
-  /** Move a folder under a parent (null = root). No-op on same parent, non-owner, or cycle. */
+  /** Move a folder under a parent. No-op on same parent, non-owner, cycle, vaults (immovable), or no target. */
   moveFolderTo: (folderId: string, parentId: string | null) => void
   deleteDoc: (id: string) => void
   deleteFolder: (id: string) => void
@@ -125,20 +125,26 @@ export function useFileMutations(showToast: (message: string) => void): FileMuta
     renameDocTo: (id, name) => renameDocMut.mutate({ id, name }),
     renameFolderTo: (id, name) => renameFolderMut.mutate({ id, name }),
     moveDocTo: (docId, folderId) => {
+      // There is no root scope anymore — every doc lives in a vault's subtree
+      // (the server 400s 'bad-folder' on null), so rootless drops are no-ops.
+      if (folderId === null) return
       const doc = (docsQuery.data ?? []).find((d) => d.id === docId)
       if (!doc || doc.folderId === folderId || doc.role !== 'owner') return
       moveDocMut.mutate({ id: docId, folderId })
     },
     moveFolderTo: (folderId, parentId) => {
+      // No new roots (the root level holds only vaults) — the server would
+      // 400 'vault-required'; reject locally like the cycle guard.
+      if (parentId === null) return
       const folders = foldersQuery.data ?? []
       const folder = folders.find((f) => f.id === folderId)
       if (!folder || folder.parentId === parentId || folder.role !== 'owner') return
-      if (parentId !== null) {
-        const target = folders.find((f) => f.id === parentId)
-        if (!target || target.role !== 'owner') return
-        // The server would 400 'cycle' — reject locally for instant feedback.
-        if (folderWithDescendants(folders, folderId).has(parentId)) return
-      }
+      // Vaults ARE the roots: they never move (server 400 'vault-immovable').
+      if (folder.kind === 'vault') return
+      const target = folders.find((f) => f.id === parentId)
+      if (!target || target.role !== 'owner') return
+      // The server would 400 'cycle' — reject locally for instant feedback.
+      if (folderWithDescendants(folders, folderId).has(parentId)) return
       moveFolderMut.mutate({ id: folderId, parentId })
     },
     deleteDoc: (id) => deleteDocMut.mutate(id),

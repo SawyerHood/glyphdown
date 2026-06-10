@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link, createFileRoute, useNavigate, useRouterState } from '@tanstack/react-router'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { FileText, Folder, MailOpen, MailX } from 'lucide-react'
+import { FileText, Folder, MailOpen, MailX, Vault } from 'lucide-react'
 import { ApiError, acceptInvite, getInvite } from '../lib/api.ts'
 import { track } from '../lib/analytics.ts'
 import { Button, Spinner } from '../components/ui.tsx'
@@ -96,14 +96,21 @@ function InvitePage() {
         ) : (
           <>
             <span className="mx-auto mb-4 flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--accent)] text-white">
-              {invite.targetType === 'doc' ? <FileText size={20} /> : <Folder size={20} />}
+              {invite.targetType === 'doc' ? (
+                <FileText size={20} />
+              ) : invite.targetKind === 'vault' ? (
+                <Vault size={20} />
+              ) : (
+                <Folder size={20} />
+              )}
             </span>
             <h1 className="display-title m-0 mb-2 text-2xl font-bold tracking-tight text-[var(--ink)]">
               You're invited
             </h1>
             <p className="m-0 mb-1 text-sm text-[var(--ink-soft)]">
               <strong className="text-[var(--ink)]">{invite.inviterName}</strong> invited you to the{' '}
-              {invite.targetType === 'doc' ? 'document' : 'folder'}
+              {/* Vault invites say "vault" — a whole shared namespace, not one folder. */}
+              {invite.targetType === 'doc' ? 'document' : invite.targetKind === 'vault' ? 'vault' : 'folder'}
             </p>
             <p className="m-0 mb-1 text-lg font-semibold text-[var(--ink)]">“{invite.targetName}”</p>
             <p className="m-0 mb-8 text-sm text-[var(--ink-soft)]">

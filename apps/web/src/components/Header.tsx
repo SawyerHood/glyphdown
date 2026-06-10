@@ -3,6 +3,7 @@ import { PanelLeft, PenLine, Settings } from 'lucide-react'
 import ThemeToggle from './ThemeToggle'
 import NotificationsBell from './NotificationsBell.tsx'
 import FeedbackButton from './FeedbackButton.tsx'
+import VaultSwitcher from './VaultSwitcher.tsx'
 import { resetAnalytics } from '../lib/analytics.ts'
 import { signOut, useSession } from '../lib/session.ts'
 import { useShellSignedIn } from '../lib/sessionGate.ts'
@@ -42,6 +43,10 @@ export default function Header() {
           </span>
           <span className="display-title text-base font-bold tracking-tight">Glyphdown</span>
         </Link>
+
+        {/* Active-vault switcher (pick / create / share / delete). The
+            Documents link next door opens the active vault's listing too. */}
+        {user ? <VaultSwitcher /> : null}
 
         <div className="ml-2 flex items-center gap-3 text-sm font-medium">
           <Link to="/" className="nav-link" activeProps={{ className: 'nav-link is-active' }} activeOptions={{ exact: true }}>

@@ -1,17 +1,23 @@
 import type { DragEvent } from 'react'
 import { Link } from '@tanstack/react-router'
-import { ChevronRight, Home } from 'lucide-react'
+import { ChevronRight, Home, Vault } from 'lucide-react'
 import type { FolderInfo } from '../../lib/api.ts'
 
 /**
- * Drive-style breadcrumb trail for the home file browser: Home → … → current
- * folder. Every segment except the current one is a navigation link AND a
- * drop target — dragging a doc/folder row onto a crumb moves it there (the
- * canonical "move up" gesture in a one-folder-at-a-time browser).
+ * Drive-style breadcrumb trail for the home file browser, ROOTED AT THE
+ * VAULT: the chain's top folder (the vault) is the first crumb — there is no
+ * "Home"/account-root crumb above it, because the root level holds only
+ * vaults and nothing lives there. Every segment except the current one is a
+ * navigation link AND a drop target — dragging a doc/folder row onto a crumb
+ * moves it there, stopping at the vault root (the canonical "move up"
+ * gesture in a one-folder-at-a-time browser).
  *
  * Drop validity beyond what's gated here (same-scope no-ops, cycles) is
  * enforced by the guarded moves in useFileMutations, so a stray drop is a
  * silent no-op rather than an error.
+ *
+ * An empty chain only happens for accounts with no vault yet (nothing ever
+ * created) — that renders the legacy static "Home" label.
  */
 export default function Breadcrumbs({
   chain,
@@ -20,20 +26,18 @@ export default function Breadcrumbs({
   setDragOver,
   onDropTo,
 }: {
-  /** Ancestor chain (topmost first, current folder last); [] at the root. */
+  /** Ancestor chain (vault first, current folder last); [] only pre-vault. */
   chain: readonly FolderInfo[]
-  /** Currently highlighted drop target ('root' = the Home crumb). */
+  /** Currently highlighted drop target (a crumb's folder id). */
   dragOverId: string | 'root' | null
   /** Whether the active drag carries a doc/folder payload we accept. */
   hasDrag: (e: DragEvent) => boolean
   setDragOver: (id: string | 'root' | null) => void
-  /** Move the dragged item to `parentId` (null = root). */
-  onDropTo: (e: DragEvent, parentId: string | null) => void
+  /** Move the dragged item into the crumb's folder. */
+  onDropTo: (e: DragEvent, parentId: string) => void
 }) {
-  const atRoot = chain.length === 0
-
   /** Shared drop-target behavior for every non-current crumb. */
-  const dropProps = (targetId: string | 'root', parentId: string | null, allowed: boolean) => ({
+  const dropProps = (targetId: string, allowed: boolean) => ({
     onDragOver: (e: DragEvent) => {
       if (!hasDrag(e) || !allowed) return
       e.preventDefault()
@@ -46,7 +50,7 @@ export default function Breadcrumbs({
     onDrop: (e: DragEvent) => {
       setDragOver(null)
       if (!allowed) return
-      onDropTo(e, parentId)
+      onDropTo(e, targetId)
     },
   })
 
@@ -57,9 +61,9 @@ export default function Breadcrumbs({
         : 'text-[var(--ink-soft)] hover:bg-[var(--paper-soft)] hover:text-[var(--ink)]'
     }`
 
-  return (
-    <nav aria-label="Folders" className="flex min-w-0 flex-wrap items-center gap-0.5">
-      {atRoot ? (
+  if (chain.length === 0) {
+    return (
+      <nav aria-label="Folders" className="flex min-w-0 flex-wrap items-center gap-0.5">
         <span
           aria-current="page"
           className="flex items-center gap-1.5 rounded-md px-2 py-1 text-sm font-semibold text-[var(--ink)]"
@@ -67,24 +71,26 @@ export default function Breadcrumbs({
           <Home size={14} className="shrink-0 text-[var(--ink-soft)]" />
           Home
         </span>
-      ) : (
-        <Link to="/" className={crumbClass(dragOverId === 'root')} {...dropProps('root', null, true)}>
-          <Home size={14} className="shrink-0" />
-          Home
-        </Link>
-      )}
+      </nav>
+    )
+  }
 
+  return (
+    <nav aria-label="Folders" className="flex min-w-0 flex-wrap items-center gap-0.5">
       {chain.map((folder, i) => {
         const isCurrent = i === chain.length - 1
+        // The vault crumb gets the vault glyph; nested crumbs stay text-only.
+        const icon = i === 0 ? <Vault size={14} className="shrink-0" aria-hidden /> : null
         return (
           <span key={folder.id} className="flex min-w-0 items-center gap-0.5">
-            <ChevronRight size={13} aria-hidden className="shrink-0 text-[var(--ink-faint)]" />
+            {i > 0 ? <ChevronRight size={13} aria-hidden className="shrink-0 text-[var(--ink-faint)]" /> : null}
             {isCurrent ? (
               <span
                 aria-current="page"
                 title={folder.name}
-                className="flex min-w-0 items-center rounded-md px-2 py-1 text-sm font-semibold text-[var(--ink)]"
+                className="flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-sm font-semibold text-[var(--ink)]"
               >
+                {i === 0 ? <Vault size={14} className="shrink-0 text-[var(--ink-soft)]" aria-hidden /> : null}
                 <span className="truncate">{folder.name}</span>
               </span>
             ) : (
@@ -93,8 +99,9 @@ export default function Breadcrumbs({
                 search={{ folder: folder.id }}
                 title={folder.name}
                 className={crumbClass(dragOverId === folder.id)}
-                {...dropProps(folder.id, folder.id, folder.role === 'owner')}
+                {...dropProps(folder.id, folder.role === 'owner')}
               >
+                {icon}
                 <span className="truncate">{folder.name}</span>
               </Link>
             )}

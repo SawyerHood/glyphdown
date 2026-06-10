@@ -16,6 +16,10 @@ export interface AnalyticsEvents {
   /** A document was created (file tree / browser, or a wiki-link create-on-open). */
   doc_created: { docId: string; source: 'file-tree' | 'wiki-link' }
   folder_created: Record<string, never>
+  /** A vault was created from the header switcher. */
+  vault_created: Record<string, never>
+  /** A vault (and its whole subtree, to trash) was deleted. */
+  vault_deleted: Record<string, never>
   /** The editor finished its first Yjs sync for a doc — the doc is truly open. */
   doc_opened: { docId: string; role: string }
   /** A share link was created (member adds ride invite_sent instead). */
@@ -43,6 +47,8 @@ export const ANALYTICS_EVENT_NAMES = [
   'sign_in',
   'doc_created',
   'folder_created',
+  'vault_created',
+  'vault_deleted',
   'doc_opened',
   'doc_shared',
   'invite_sent',

@@ -3,10 +3,12 @@ import { useNavigate, useRouterState } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import { FileText, Search } from 'lucide-react'
 import type { SearchResult } from '@glyphdown/protocol'
-import { listDocs, searchDocs } from '../lib/api.ts'
+import { listDocs, listFolders, searchDocs } from '../lib/api.ts'
 import { track } from '../lib/analytics.ts'
 import { rankDocs } from '../lib/fuzzy.ts'
 import { getRecentDocIds, recordRecentDoc } from '../lib/recents.ts'
+import { useActiveVault } from '../lib/useActiveVault.ts'
+import { docVaultId } from '../lib/vaults.ts'
 
 /**
  * Cmd/Ctrl+K quick switcher (mounted once in __root.tsx): instant fuzzy
@@ -14,6 +16,13 @@ import { getRecentDocIds, recordRecentDoc } from '../lib/recents.ts'
  * localStorage visited list), plus a debounced full-text section from
  * GET /api/search with «»-highlighted snippets. Arrow keys + Enter navigate,
  * Esc / backdrop click closes.
+ *
+ * SCOPED TO THE ACTIVE VAULT (vaults plan §4): each doc's vault is computed
+ * client-side from the folders list (folderId → parent chain → vault root)
+ * and both sections filter to it. Docs whose vault is not derivable (e.g. a
+ * doc shared directly out of someone else's vault) stay visible in every
+ * scope — hiding them everywhere would lose them entirely. Server-side
+ * search stays vault-agnostic; the Worker filter is a planned fast-follow.
  */
 
 const SEARCH_DEBOUNCE_MS = 250
@@ -63,6 +72,20 @@ function SwitcherPanel({ onClose }: { onClose: () => void }) {
   const recents = useMemo(() => getRecentDocIds(), [])
 
   const docsQuery = useQuery({ queryKey: ['docs'], queryFn: listDocs })
+  const foldersQuery = useQuery({ queryKey: ['folders'], queryFn: listFolders })
+  const activeVault = useActiveVault()
+
+  // The active vault's docs (plus vault-less strays, which would otherwise be
+  // unreachable from any scope). No filtering until both lists have loaded.
+  const scopedDocs = useMemo(() => {
+    const docs = docsQuery.data ?? []
+    const folders = foldersQuery.data
+    if (activeVault === null || folders === undefined) return docs
+    return docs.filter((d) => {
+      const vaultId = docVaultId(d, folders)
+      return vaultId === null || vaultId === activeVault.id
+    })
+  }, [docsQuery.data, foldersQuery.data, activeVault])
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(query.trim()), SEARCH_DEBOUNCE_MS)
@@ -87,15 +110,15 @@ function SwitcherPanel({ onClose }: { onClose: () => void }) {
     track('search_performed', { resultCount: searchQuery.data.length })
   }, [debounced, searchQuery.data])
 
-  const titleHits = useMemo(
-    () => rankDocs(query.trim(), docsQuery.data ?? [], recents),
-    [query, docsQuery.data, recents],
-  )
+  const titleHits = useMemo(() => rankDocs(query.trim(), scopedDocs, recents), [query, scopedDocs, recents])
   const fullText: SearchResult[] = useMemo(() => {
     if (debounced.length === 0 || !searchQuery.data) return []
     const inTitles = new Set(titleHits.map((h) => h.doc.id))
-    return searchQuery.data.filter((r) => !inTitles.has(r.docId))
-  }, [debounced, searchQuery.data, titleHits])
+    // Full-text results scope to the vault too: keep a hit only when it maps
+    // to a doc the scoped list contains.
+    const inScope = new Set(scopedDocs.map((d) => d.id))
+    return searchQuery.data.filter((r) => inScope.has(r.docId) && !inTitles.has(r.docId))
+  }, [debounced, searchQuery.data, titleHits, scopedDocs])
 
   const items: Item[] = useMemo(
     () => [
@@ -192,7 +215,7 @@ function SwitcherPanel({ onClose }: { onClose: () => void }) {
             autoFocus
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="Jump to a doc or search…"
+            placeholder={activeVault ? `Jump to a doc or search in ${activeVault.name}…` : 'Jump to a doc or search…'}
             aria-label="Search documents"
             className="w-full bg-transparent text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)]"
           />

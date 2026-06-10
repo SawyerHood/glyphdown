@@ -5,6 +5,7 @@ import { Clock3, FilePlus2, FileText, Folder, FolderPlus, Image as ImageIcon, Pe
 import { MAX_FOLDER_DEPTH, type AssetMeta, type DocMeta } from '@glyphdown/protocol'
 import { listDocs, listFolderAssets, listFolders, type FolderInfo } from '../../lib/api.ts'
 import { breadcrumbChain, folderListing, recentDocs } from '../../lib/browse.ts'
+import { docVaultId } from '../../lib/vaults.ts'
 import { folderWithDescendants, sortAssets } from '../../lib/fileTree.ts'
 import { timeAgo } from '../../lib/presence.ts'
 import { getRecentDocIds } from '../../lib/recents.ts'
@@ -21,11 +22,14 @@ import { Badge, Button, ConfirmDialog, EmptyState } from '../ui.tsx'
 import Breadcrumbs from './Breadcrumbs.tsx'
 
 /**
- * Drive-style file browser — the signed-in home page. Shows ONE folder's
- * contents at a time (`/?folder=<id>`, absent = root): subfolders first, then
- * docs, then the folder's image assets, each group alphabetical. Single click
- * opens (folder → ?folder=id, doc → /d/$docId, asset → lightbox); the ⋯ menu
- * carries rename/delete for owners.
+ * Drive-style file browser — the signed-in home page, ROOTED AT A VAULT
+ * (routes/index.tsx resolves the active vault and redirects bare `/` to
+ * `/?folder=<vaultId>`; the vault is the breadcrumb root). Shows ONE folder's
+ * contents at a time: subfolders first, then docs, then the folder's image
+ * assets, each group alphabetical. Single click opens (folder → ?folder=id,
+ * doc → /d/$docId, asset → lightbox); the ⋯ menu carries rename/delete for
+ * owners. folderId === null only for accounts with no vault yet (the legacy
+ * root view with its first-doc empty state).
  *
  * "New doc" / "New folder" create in the CURRENT folder via an inline name
  * row (doc names live-slugify as you type) — nested folders are made by
@@ -111,7 +115,7 @@ export default function FileBrowser({ folderId }: { folderId: string | null }) {
   const hasFolderDrag = (e: DragEvent) => e.dataTransfer.types.includes(FOLDER_DRAG_MIME)
   const hasAnyDrag = (e: DragEvent) => hasDocDrag(e) || (hasFolderDrag(e) && draggingFolder !== null)
 
-  /** Shared drop handler: move whatever was dragged into `parentId` (null = root). */
+  /** Shared drop handler: move whatever was dragged into `parentId` (a breadcrumb folder, vault root included). */
   const dropTo = (e: DragEvent, parentId: string | null) => {
     const droppedFolderId = e.dataTransfer.getData(FOLDER_DRAG_MIME)
     if (droppedFolderId) {
@@ -201,7 +205,10 @@ export default function FileBrowser({ folderId }: { folderId: string | null }) {
         ) : null}
       </div>
 
-      {folderId === null && !loading ? <RecentStrip docs={docs} /> : null}
+      {/* Recent chips at the top of the ACTIVE VAULT, scoped to its docs. */}
+      {currentFolder?.kind === 'vault' && !loading ? (
+        <RecentStrip docs={docs.filter((d) => docVaultId(d, folders) === currentFolder.id)} />
+      ) : null}
 
       {loading ? (
         <BrowserSkeleton />
@@ -222,7 +229,9 @@ export default function FileBrowser({ folderId }: { folderId: string | null }) {
           <EmptyState title="No documents yet" hint="Create your first markdown doc — or pull one with the ink CLI." />
         ) : (
           <div className="rounded-lg border border-dashed border-[var(--line)] px-4 py-10 text-center">
-            <p className="m-0 text-sm font-medium text-[var(--ink-soft)]">This folder is empty</p>
+            <p className="m-0 text-sm font-medium text-[var(--ink-soft)]">
+              {currentFolder?.kind === 'vault' ? 'This vault is empty' : 'This folder is empty'}
+            </p>
             {isOwnerHere ? (
               <div className="mt-3 flex justify-center gap-2">
                 {canCreateFolder ? (

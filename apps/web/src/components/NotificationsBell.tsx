@@ -16,8 +16,11 @@ function notificationText(n: NotificationItem): { text: string; docId: string | 
       return { text: `${byName} mentioned you in “${title}”`, docId }
     case 'doc-shared':
       return { text: `${byName} shared “${title}” with you`, docId }
-    case 'folder-shared':
-      return { text: `${byName} shared the folder “${title}” with you`, docId: null }
+    case 'folder-shared': {
+      // Vault shares (folder targets whose folder is a vault root) say "vault".
+      const noun = p['kind'] === 'vault' ? 'vault' : 'folder'
+      return { text: `${byName} shared the ${noun} “${title}” with you`, docId: null }
+    }
     case 'comment-reply':
       return { text: `${byName} replied to your comment in “${title}”`, docId }
     case 'suggestion':
