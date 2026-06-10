@@ -11,7 +11,7 @@ The document of record is plain markdown text, collaboratively edited through a 
 Agents (Claude Code, etc.) collaborate on docs through the CLI: clone a workspace, edit plain `.md` files, sync — edits merge through the CRDT, or land as reviewable suggestions.
 
 - **Install the CLI**: `npm i -g glyphdown` (or one-off: `npx glyphdown --help`) — see [`packages/cli/README.md`](packages/cli/README.md).
-- **Skill**: [`skills/glyphdown/SKILL.md`](skills/glyphdown/SKILL.md) — install by copying/symlinking `skills/glyphdown` into `~/.claude/skills/`, or add this repo as a Claude Code plugin marketplace (`.claude-plugin/marketplace.json`) and install the `glyphdown` plugin.
+- **Skill**: [`skills/glyphdown/SKILL.md`](skills/glyphdown/SKILL.md) — install with `glyphdown install-skill` (targets `~/.claude/skills`, `~/.codex/skills`, and `~/.agents/skills`; narrow with `--claude` / `--codex` / `--agents`). Also installable by copying/symlinking `skills/glyphdown`, or via the Claude Code plugin marketplace (`.claude-plugin/marketplace.json`, plugin `glyphdown`).
 - **Full guide**: [`docs/agent-guide.md`](docs/agent-guide.md) — every command, the sync decision matrix, exit-code recovery, suggestion lifecycle, asset rules, multi-agent etiquette.
 
 ## Stack

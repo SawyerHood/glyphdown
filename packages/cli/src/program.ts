@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, renameSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { normalizeEol } from '@glyphdown/core'
 import { Command, CommanderError } from 'commander'
@@ -13,6 +14,7 @@ import {
   syncAssets,
 } from './assets.ts'
 import { type CliConfig, clearCredentials, loginWithDeviceCode, resolveConfig, writeConfig } from './config.ts'
+import { SKILL_MD } from './skill-content.gen.ts'
 import { parseDocRef } from './docref.ts'
 import { CliError, DEGENERATE_MESSAGE } from './errors.ts'
 import { clone, syncWorkspace } from './mirror.ts'
@@ -26,6 +28,8 @@ export interface ProgramDeps {
   makeApi?: (config: { serverUrl: string; apiKey?: string; sessionToken?: string }) => Api
   env?: NodeJS.ProcessEnv
   cwd?: () => string
+  /** Home directory for default install-skill targets (tests inject a tmp dir). */
+  home?: () => string
   /** Line sink for stdout-bound output (tests capture). */
   out?: (line: string) => void
   /** Line sink for stderr-bound diagnostics. */
@@ -48,6 +52,7 @@ function parseIntStrict(value: string): number {
 export function createProgram(deps: ProgramDeps = {}): Command {
   const env = deps.env ?? process.env
   const cwd = deps.cwd ?? (() => process.cwd())
+  const home = deps.home ?? (() => homedir())
   const fetchImpl = deps.fetchImpl
   const out = deps.out ?? ((line: string) => console.log(line))
   const errOut = deps.err ?? ((line: string) => console.error(line))
@@ -134,6 +139,44 @@ export function createProgram(deps: ProgramDeps = {}): Command {
         }
       }
       out(removed.hadApiKey ? 'stored API key removed' : 'no stored credentials')
+    })
+
+  // -- install-skill / guide ----------------------------------------------------
+  // Same shape as omegacode's install-skill: default to ALL known skills
+  // directories — ~/.claude/skills (Claude Code), ~/.codex/skills (Codex),
+  // ~/.agents/skills (the cross-agent convention) — narrow with
+  // --claude / --codex / --agents, or point anywhere with --dir.
+  program
+    .command('install-skill')
+    .description('install the glyphdown skill into agent skills directories (default: ~/.claude/skills, ~/.codex/skills, and ~/.agents/skills)')
+    .option('--claude', 'only ~/.claude/skills (Claude Code)')
+    .option('--codex', 'only ~/.codex/skills (Codex)')
+    .option('--agents', 'only ~/.agents/skills')
+    .option('--dir <path>', 'install into this skills directory instead (the skill lands in <dir>/glyphdown/)')
+    .action((opts: { claude?: boolean; codex?: boolean; agents?: boolean; dir?: string }) => {
+      const bases: string[] = []
+      if (opts.dir) {
+        bases.push(resolve(cwd(), opts.dir))
+      } else {
+        const all = !opts.claude && !opts.codex && !opts.agents
+        if (all || opts.claude) bases.push(join(home(), '.claude', 'skills'))
+        if (all || opts.codex) bases.push(join(home(), '.codex', 'skills'))
+        if (all || opts.agents) bases.push(join(home(), '.agents', 'skills'))
+      }
+      for (const base of bases) {
+        const target = join(base, 'glyphdown')
+        mkdirSync(target, { recursive: true })
+        writeFileSync(join(target, 'SKILL.md'), SKILL_MD)
+        out(`installed skill → ${join(target, 'SKILL.md')}`)
+      }
+      out(pc.dim('your agent picks it up automatically — try asking it to "sync my notes"'))
+    })
+
+  program
+    .command('guide')
+    .description('print the agent skill/usage guide to stdout (the skill body, minus frontmatter)')
+    .action(() => {
+      out(SKILL_MD.replace(/^---\n[\s\S]*?\n---\n+/, ''))
     })
 
   // -- list -------------------------------------------------------------------

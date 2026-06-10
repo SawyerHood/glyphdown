@@ -7,7 +7,7 @@ description: Collaborate on Glyphdown docs (Google Docs for markdown) via the gl
 
 CLI for collaborating on Glyphdown markdown docs. Humans edit live in the web UI; you edit plain `.md` files and the server CRDT-merges, so concurrent human work survives — as long as you follow the rules below.
 
-Full reference: [docs/agent-guide.md](../../docs/agent-guide.md) in this repo.
+Full reference: [docs/agent-guide.md](https://github.com/SawyerHood/glyphdown/blob/main/docs/agent-guide.md) (works from the repo or a CLI-installed copy).
 
 ## Auth
 
