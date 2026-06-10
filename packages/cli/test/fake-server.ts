@@ -253,6 +253,11 @@ export interface Harness {
   run: (args: string[]) => Promise<void>
 }
 
+// picocolors turns styling on whenever CI is set, so harness assertions must
+// see the unstyled text in any environment.
+const ANSI_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g')
+const stripAnsi = (s: string) => s.replace(ANSI_PATTERN, '')
+
 export function harness(dir: string, state: FakeServer): Harness {
   const lines: string[] = []
   const errors: string[] = []
@@ -260,8 +265,8 @@ export function harness(dir: string, state: FakeServer): Harness {
     makeApi: (cfg) => createApi({ serverUrl: cfg.serverUrl, apiKey: 'gd_sk_test', fetchImpl: fetchFor(state) }),
     env: { GLYPHDOWN_SERVER: SERVER, GLYPHDOWN_API_KEY: 'gd_sk_test' },
     cwd: () => dir,
-    out: (l) => lines.push(l),
-    err: (l) => errors.push(l),
+    out: (l) => lines.push(stripAnsi(l)),
+    err: (l) => errors.push(stripAnsi(l)),
   })
   return { lines, errors, run: (args) => program.parseAsync(args, { from: 'user' }).then(() => undefined) }
 }
