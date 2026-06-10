@@ -43,6 +43,7 @@ describe('isAdminEmail', () => {
   it('matches the allowlist case-insensitively', () => {
     expect(isAdminEmail('kirbyhood@gmail.com')).toBe(true)
     expect(isAdminEmail('  KirbyHood@Gmail.com ')).toBe(true)
+    expect(isAdminEmail('sawyerjhood@gmail.com')).toBe(true)
     expect(isAdminEmail('alice@example.com')).toBe(false)
   })
 })

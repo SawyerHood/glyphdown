@@ -10,7 +10,7 @@ import { listFeedback } from './feedback.ts'
  * migration on the better-auth-managed `user` table and an admin-management
  * surface. Adding an admin = edit this set + deploy.
  */
-const ADMIN_EMAILS: ReadonlySet<string> = new Set(['kirbyhood@gmail.com'])
+const ADMIN_EMAILS: ReadonlySet<string> = new Set(['kirbyhood@gmail.com', 'sawyerjhood@gmail.com'])
 
 export function isAdminEmail(email: string): boolean {
   return ADMIN_EMAILS.has(email.trim().toLowerCase())
