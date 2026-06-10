@@ -7,6 +7,7 @@ import QuickSwitcher from '../components/QuickSwitcher.tsx'
 import AppErrorBoundary from '../components/AppErrorBoundary.tsx'
 import { getServerSession } from '../lib/session.ts'
 import { identifyUser, initAnalytics, trackPageview } from '../lib/analytics.ts'
+import { installChunkReloadHandler } from '../lib/chunkReload.ts'
 
 import appCss from '../styles.css?url'
 
@@ -79,6 +80,9 @@ function RootDocument({ children }: { children: React.ReactNode }) {
   // EVERYONE (signed-in users and anonymous share-link viewers alike).
   useEffect(() => {
     initAnalytics()
+    // Stale-deploy self-healing: reload when a lazy chunk 404s after a deploy
+    // (vite:preloadError). Installed once; the shell never unmounts.
+    installChunkReloadHandler()
   }, [])
   // $pageview on every router navigation (autocapture/pageview-capture is off).
   useEffect(() => {
