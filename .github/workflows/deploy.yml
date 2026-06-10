@@ -5,10 +5,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# GitHub deprecates Node20 JS actions on June 16; force them onto Node24.
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 permissions:
   contents: read
 
@@ -43,11 +39,11 @@ jobs:
           echo "::error::CLOUDFLARE_API_TOKEN repo secret is not set. Create a Cloudflare API token (Edit Cloudflare Workers template + D1 Edit, account-scoped) and run: gh secret set CLOUDFLARE_API_TOKEN"
           exit 1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
