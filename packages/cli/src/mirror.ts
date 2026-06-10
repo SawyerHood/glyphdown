@@ -496,7 +496,7 @@ export async function syncWorkspace(opts: MirrorSyncOptions): Promise<MirrorSync
       node.folderName = created.name
       dirByFolderKey.set(created.id, node)
       folderById.set(created.id, created)
-      results.push({ docId: created.id, file: `${node.rel}/`, action: 'folder-created' })
+      results.push({ docId: created.id, file: `${node.rel}/`, action: 'folder-created', message: folderUrl(serverUrl, created.id) })
     } catch (error) {
       node.skipCreation = true
       results.push({ docId: node.rel, file: `${node.rel}/`, action: 'failed', message: errorMessage(error) })
@@ -719,6 +719,16 @@ function hasSyncableContent(abs: string): boolean {
   return false
 }
 
+/** Web URL for a doc — same shape as `glyphdown new` prints. */
+function docUrl(serverUrl: string, docId: string): string {
+  return `${serverUrl.replace(/\/+$/, '')}/d/${docId}`
+}
+
+/** Web URL for a folder (the /f/:folderId share-link landing page). */
+function folderUrl(serverUrl: string, folderId: string): string {
+  return `${serverUrl.replace(/\/+$/, '')}/f/${folderId}`
+}
+
 /**
  * Create a server doc from an untracked local .md. The FILE NAME is the
  * doc name (slugified when it isn't already a clean slug — reported, e.g.
@@ -772,6 +782,7 @@ async function createDocFromFile(
     }
   }
   const renamedNote = trackedFile !== file ? ` (${file} → ${trackedFile})` : ''
+  const url = docUrl(serverUrl, meta.id)
   const id = { docId: meta.id, file: trackedFile }
 
   try {
@@ -787,7 +798,7 @@ async function createDocFromFile(
         text,
         ...(content.versionId !== null ? { versionId: content.versionId } : {}),
       })
-      return { ...id, action: 'created', message: `${canonical}${renamedNote}` }
+      return { ...id, action: 'created', message: `${canonical}${renamedNote} — ${url}` }
     }
     const { response } = await pushWithBase(api, {
       docId: meta.id,
@@ -798,20 +809,20 @@ async function createDocFromFile(
     if (!response.ok) {
       // Track against the server text so the next sync retries the push.
       recordBase({ dir: node.abs, file: trackedFile, docId: meta.id, serverUrl, text: content.text })
-      return { ...id, action: 'failed', message: `created ${canonical} but the initial push was rejected: ${pushRejection(response).message}` }
+      return { ...id, action: 'failed', message: `created ${canonical} (${url}) but the initial push was rejected: ${pushRejection(response).message}` }
     }
     if (response.mode === 'suggest') {
       recordBase({ dir: node.abs, file: trackedFile, docId: meta.id, serverUrl, text: content.text })
-      return { ...id, action: 'created', message: `${canonical} — content landed as suggestion ${response.suggestionId}` }
+      return { ...id, action: 'created', message: `${canonical} — content landed as suggestion ${response.suggestionId} — ${url}` }
     }
     if (response.failedHunks.length > 0) {
       recordBase({ dir: node.abs, file: trackedFile, docId: meta.id, serverUrl, text: content.text })
       opts.err(`warning: ${trackedFile} — ${response.failedHunks.length} hunk(s) failed on the initial push`)
-      return { ...id, action: 'failed', failedHunks: response.failedHunks.length, message: `created ${canonical} but ${response.failedHunks.length} hunk(s) failed — run glyphdown sync again` }
+      return { ...id, action: 'failed', failedHunks: response.failedHunks.length, message: `created ${canonical} (${url}) but ${response.failedHunks.length} hunk(s) failed — run glyphdown sync again` }
     }
     recordBase({ dir: node.abs, file: trackedFile, docId: meta.id, serverUrl, text, versionId: response.versionId })
-    return { ...id, action: 'created', message: `${canonical}${renamedNote}` }
+    return { ...id, action: 'created', message: `${canonical}${renamedNote} — ${url}` }
   } catch (error) {
-    return { ...id, action: 'failed', message: `created ${canonical} but pushing its content failed: ${errorMessage(error)}` }
+    return { ...id, action: 'failed', message: `created ${canonical} (${url}) but pushing its content failed: ${errorMessage(error)}` }
   }
 }
