@@ -1,5 +1,6 @@
 import { FolderTree, GitPullRequest, History, MessageSquare, PenLine, Users } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+import MdKicker from './MdKicker.tsx'
 
 const FEATURES: Array<{ icon: LucideIcon; title: string; body: string }> = [
   {
@@ -38,19 +39,19 @@ export default function FeatureGrid() {
   return (
     <section className="border-t border-[var(--line)] py-20">
       <div className="page-wrap">
-        <div className="mb-12 max-w-2xl">
-          <p className="island-kicker mb-3">Everything a doc needs</p>
+        <div className="reveal-up mb-12 max-w-2xl">
+          <MdKicker className="mb-3">Everything a doc needs</MdKicker>
           <h2 className="display-title m-0 text-3xl font-bold tracking-tight text-[var(--ink)]">
             The Google Docs parts, on plain markdown
           </h2>
         </div>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="reveal-up grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {FEATURES.map(({ icon: Icon, title, body }) => (
-            <div key={title} className="island-shell p-5">
-              <span className="mb-3 flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent)]">
-                <Icon size={16} />
-              </span>
-              <h3 className="m-0 mb-1.5 text-sm font-semibold text-[var(--ink)]">{title}</h3>
+            <div key={title} className="island-shell feature-card p-5">
+              <h3 className="m-0 mb-2 flex items-center gap-2.5 text-[15px] font-semibold text-[var(--ink)]">
+                <Icon size={16} className="shrink-0 text-[var(--accent)]" aria-hidden="true" />
+                {title}
+              </h3>
               <p className="m-0 text-[13px] leading-6 text-[var(--ink-soft)]">{body}</p>
             </div>
           ))}

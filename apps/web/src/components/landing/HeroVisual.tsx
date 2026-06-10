@@ -118,8 +118,14 @@ function DocMock() {
 
 export default function HeroVisual() {
   return (
-    <div aria-hidden="true" className="grid items-start gap-5 lg:grid-cols-2">
+    <div aria-hidden="true" className="relative grid items-start gap-5 lg:grid-cols-2 lg:gap-8">
       <Terminal />
+      {/* The suggestion's journey: terminal push → doc review (lg+ only). */}
+      <span className="absolute left-1/2 top-24 z-10 hidden h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-[var(--line)] bg-[var(--paper)] text-[var(--accent)] shadow-md lg:flex">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8">
+          <path d="M2.5 8h10M9 4.5 13 8l-4 3.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </span>
       <DocMock />
     </div>
   )

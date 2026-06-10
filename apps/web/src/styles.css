@@ -349,6 +349,113 @@ code {
   }
 }
 
+/* ---------------------------------------------------------------------------
+   Landing page (components/landing/*). The visual language is markdown
+   itself: mono `##` kickers, oversized faint markdown punctuation as hero
+   atmosphere, and the editor's blinking caret in the headline.
+--------------------------------------------------------------------------- */
+
+/* Mono markdown kicker — pair with an accent `## ` span in the markup. */
+.md-kicker {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+}
+
+/* Dot-grid sheet + a soft accent wash, fading out toward the bottom. */
+.land-atmosphere {
+  background-image:
+    radial-gradient(ellipse 70% 55% at 50% -12%, var(--accent-soft), transparent 70%),
+    radial-gradient(var(--line) 1px, transparent 1px);
+  background-size:
+    100% 100%,
+    24px 24px;
+  mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
+}
+
+/* Giant markdown punctuation floating behind the hero (aria-hidden). */
+.land-glyph {
+  position: absolute;
+  font-family: "Source Serif 4", Georgia, serif;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--ink);
+  opacity: 0.05;
+  user-select: none;
+  pointer-events: none;
+}
+
+/* Block caret after the headline — the editor's cursor, alive. */
+.hero-caret {
+  display: inline-block;
+  width: 0.09em;
+  height: 0.82em;
+  margin-left: 0.08em;
+  vertical-align: baseline;
+  transform: translateY(0.08em);
+  background: var(--accent);
+  animation: caret-blink 1.1s steps(2, jump-none) infinite;
+}
+
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* Scroll-driven section reveals: pure CSS, progressive enhancement (browsers
+   without animation-timeline simply render the content as-is, no JS). */
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .reveal-up {
+      animation: reveal-up 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+      animation-timeline: view();
+      animation-range: entry 5% entry 45%;
+    }
+  }
+}
+
+@keyframes reveal-up {
+  from {
+    opacity: 0;
+    transform: translateY(22px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Feature cards: quiet at rest, a lift + accent border on hover. */
+.feature-card {
+  transition:
+    transform 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.feature-card:hover {
+  transform: translateY(-3px);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  box-shadow: 0 10px 28px -14px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-caret {
+    animation: none;
+  }
+  .feature-card,
+  .feature-card:hover {
+    transform: none;
+    transition: none;
+  }
+  .rise-in {
+    animation-duration: 1ms;
+    animation-delay: 0ms !important;
+  }
+}
+
 /* Renderer polish: theme-aware divider + quote borders (editor baseTheme is light-only). */
 .ink-editor .cm-editor .cm-ink-hr-widget {
   border-top-color: var(--line);

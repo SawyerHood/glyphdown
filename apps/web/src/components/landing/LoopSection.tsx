@@ -1,8 +1,11 @@
 import { CodeBlock, Dim, Ok, Prompt } from './CodeBlock.tsx'
+import MdKicker from './MdKicker.tsx'
 
 /**
- * The core narrative: notes sync to disk, agents push to them, you review.
- * Snippets use the real `glyphdown` command syntax and output formats.
+ * The real onboarding loop: sign in once, hand your agent the skill, then ask
+ * in plain English — the agent drives the CLI and you review in the browser.
+ * Steps stack vertically off a dashed rail so each snippet gets a full
+ * column's width (command output matches the real CLI / Claude Code).
  */
 
 function Step({
@@ -17,11 +20,16 @@ function Step({
   children: React.ReactNode
 }) {
   return (
-    <div className="flex flex-col">
-      <p className="island-kicker m-0 mb-2">Step {n}</p>
-      <h3 className="display-title m-0 mb-2 text-xl font-bold text-[var(--ink)]">{title}</h3>
-      <p className="m-0 mb-4 text-sm leading-6 text-[var(--ink-soft)]">{body}</p>
-      <div className="mt-auto">{children}</div>
+    <div className="reveal-up relative grid gap-5 pl-14 md:grid-cols-[5fr_6fr] md:gap-10">
+      {/* z-10 + paper background so the chip masks the rail running behind it. */}
+      <span className="absolute left-0 top-0 z-10 flex h-9 w-9 items-center justify-center rounded-full border border-[var(--line)] bg-[var(--paper)] font-mono text-[13px] font-semibold text-[var(--accent)]">
+        {n}
+      </span>
+      <div>
+        <h3 className="display-title m-0 mb-2 text-xl font-bold text-[var(--ink)]">{title}</h3>
+        <p className="m-0 text-sm leading-6 text-[var(--ink-soft)]">{body}</p>
+      </div>
+      <div className="min-w-0">{children}</div>
     </div>
   )
 }
@@ -30,59 +38,64 @@ export default function LoopSection() {
   return (
     <section className="border-t border-[var(--line)] py-20">
       <div className="page-wrap">
-        <div className="mb-12 max-w-2xl">
-          <p className="island-kicker mb-3">The loop</p>
+        <div className="reveal-up mb-14 max-w-2xl">
+          <MdKicker className="mb-3">The loop</MdKicker>
           <h2 className="display-title m-0 text-3xl font-bold tracking-tight text-[var(--ink)]">
             Plain files in. Reviewed changes out.
           </h2>
         </div>
-        <div className="grid gap-10 md:grid-cols-3 md:gap-8">
+        <div className="relative flex flex-col gap-14">
+          {/* The rail: a dashed line threading the step chips. */}
+          <div
+            aria-hidden="true"
+            className="absolute bottom-8 left-[17px] top-5 border-l border-dashed border-[var(--line)]"
+          />
           <Step
-            n="1"
-            title="Sync your notes"
-            body="Mirror your whole account — every folder and doc — as plain .md files on disk. glyphdown sync reconciles both ways: local edits push, browser edits pull, concurrent edits merge through the CRDT. New local files and folders become docs."
+            n="01"
+            title="Sign in"
+            body="Install the CLI and glyphdown login prints a device code — approve it in the browser and the session is saved. No tokens to paste; agents get their own minted identities in the next step."
           >
             <CodeBlock>
               <Prompt />
-              glyphdown clone{'\n'}
+              npm i -g glyphdown{'\n'}
               <Prompt />
-              glyphdown sync{'\n'}
-              launch-plan.md <Ok>pushed</Ok>
+              glyphdown login{'\n'}
+              <Dim>To sign in, visit:</Dim>
               {'\n'}
-              roadmap.md     <Ok>merged</Ok>
-              {'\n'}
-              ideas.md       <Ok>pulled</Ok>
+              {'  '}glyphdown.com/device{'\n'}
+              <Dim>and enter the code:</Dim> GLYF-K3QP{'\n'}
+              <Ok>signed in</Ok> <Dim>— session saved</Dim>
             </CodeBlock>
           </Step>
           <Step
-            n="2"
-            title="Send in your agents"
-            body="Mint an API key in Settings → Agents and hand it to Claude Code. The agent works on the same files with its own identity — every edit, comment, and suggestion is attributed to it."
+            n="02"
+            title="Hand your agent the skill"
+            body="One command drops the glyphdown skill into Claude Code, Codex, and any agent reading ~/.agents/skills. It teaches the whole workflow — clone, sync, push, suggest, comment — and the etiquette: suggest instead of edit when it matters, never clobber concurrent human work."
           >
             <CodeBlock>
               <Prompt />
-              export GLYPHDOWN_API_KEY=gd_sk_…{'\n'}
-              <Prompt />
-              glyphdown push launch-plan.md \{'\n'}
-              {'    '}--suggest -m "tighten the intro"{'\n'}
-              suggestion <Ok>s_7f3a</Ok> created
+              glyphdown install-skill{'\n'}
+              <Ok>installed skill</Ok> <Dim>→ ~/.claude/skills/glyphdown</Dim>
+              {'\n'}
+              <Ok>installed skill</Ok> <Dim>→ ~/.codex/skills/glyphdown</Dim>
+              {'\n'}
+              <Ok>installed skill</Ok> <Dim>→ ~/.agents/skills/glyphdown</Dim>
             </CodeBlock>
           </Step>
           <Step
-            n="3"
-            title="Review like a PR"
-            body="Pushes with --suggest land as suggestion sets: insertions in green, deletions struck through. Accept or reject each one in the browser, with comments and version history keeping the trail."
+            n="03"
+            title="Then just ask"
+            body="Prompt in plain English. The agent clones your workspace, edits the .md files, and pushes back through the CRDT — as reviewable suggestions when it matters. Accept or reject in the browser; comments and version history keep the trail."
           >
             <CodeBlock>
-              <Prompt />
-              glyphdown suggestions launch-plan{'\n'}
-              s_7f3a <Dim>Claude · run by kirby</Dim>
+              <Dim>&gt;</Dim> sync my notes and tighten up the launch plan{'\n\n'}
+              <Dim>⏺</Dim> glyphdown sync{'\n'}
+              {'  '}launch-plan.md <Ok>pulled</Ok> <Dim>· 12 docs up to date</Dim>
               {'\n'}
-              {'  '}
-              <Ok>+ "We launch October 6…"</Ok>
-              {'\n'}
-              {'  '}
-              <span className="text-red-600 dark:text-red-400">- "We will probably launch…"</span>
+              <Dim>⏺</Dim> glyphdown push launch-plan.md --suggest \{'\n'}
+              {'      '}-m "tighten the launch intro"{'\n'}
+              {'  '}suggestion <Ok>s_7f3a</Ok> created{'\n\n'}
+              <Dim>review in the browser — accept or reject each change</Dim>
             </CodeBlock>
           </Step>
         </div>

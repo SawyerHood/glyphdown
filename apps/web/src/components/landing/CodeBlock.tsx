@@ -10,7 +10,7 @@ import { Check, Copy } from 'lucide-react'
 export function CodeBlock({ children, className = '' }: { children: ReactNode; className?: string }) {
   return (
     <pre
-      className={`m-0 overflow-x-auto rounded-lg border border-[var(--line)] bg-[var(--paper-soft)] px-4 py-3 font-mono text-[12.5px] leading-6 text-[var(--ink)] ${className}`}
+      className={`m-0 overflow-x-auto rounded-lg border border-[var(--line)] bg-[var(--paper-soft)] px-5 py-4 font-mono text-[13px] leading-7 text-[var(--ink)] ${className}`}
     >
       {children}
     </pre>

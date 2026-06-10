@@ -4,7 +4,7 @@ import ThemeToggle from '../ThemeToggle.tsx'
 import Hero from './Hero.tsx'
 import LoopSection from './LoopSection.tsx'
 import FeatureGrid from './FeatureGrid.tsx'
-import AgentsSection from './AgentsSection.tsx'
+import ClosingCta from './ClosingCta.tsx'
 
 /**
  * The public landing page — rendered at `/` for signed-out visitors, without
@@ -94,7 +94,7 @@ export default function Landing() {
         <Hero />
         <LoopSection />
         <FeatureGrid />
-        <AgentsSection />
+        <ClosingCta />
       </main>
       <LandingFooter />
     </div>

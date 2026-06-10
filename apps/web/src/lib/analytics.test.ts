@@ -45,6 +45,18 @@ afterEach(() => {
 })
 
 describe('graceful degradation (no key)', () => {
+  // "No key" must mean NO key: the dev machine's apps/web/.env sets
+  // VITE_POSTHOG_KEY (vitest loads .env like any vite build), and
+  // initAnalytics falls back to it when opts.key is absent — so blank it out
+  // or these tests would exercise the configured path.
+  beforeEach(() => {
+    vi.stubEnv('VITE_POSTHOG_KEY', '')
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
   it('initAnalytics without a key never invokes the loader', () => {
     const { loader } = deferredLoader()
     initAnalytics({ loader })
