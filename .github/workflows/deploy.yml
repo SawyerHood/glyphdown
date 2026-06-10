@@ -56,6 +56,10 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build web
+        # VITE_* vars are vite build-time env: missing key = analytics silently
+        # off in the shipped bundle (see apps/web/.dev.vars.example).
+        env:
+          VITE_POSTHOG_KEY: ${{ secrets.VITE_POSTHOG_KEY }}
         run: pnpm --filter web build
 
       - name: Apply D1 migrations
