@@ -109,6 +109,14 @@ const doc = (id: string, sub = '') => `/api/docs/${encodeURIComponent(id)}${sub}
 // Identity
 // ---------------------------------------------------------------------------
 
+export interface AdminStats {
+  users: number
+  docs: { created: number; active: number }
+}
+
+/** 404s (ApiError) for everyone but allowlisted admins — see api/admin.ts. */
+export const getAdminStats = () => request<AdminStats>('/api/admin/stats')
+
 export async function fetchMe(): Promise<Principal | null> {
   try {
     const { principal } = await request<{ principal: Principal }>('/api/me')

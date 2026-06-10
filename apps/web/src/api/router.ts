@@ -7,6 +7,7 @@ import { asAppEnv } from '../env.ts'
 import { createDb, type Db } from '../db/client.ts'
 import { agents, docMembers, docs, folderMembers, folders, notifications, shareLinks, user, userPrefs } from '../db/schema.ts'
 import { type AuthContext, resolvePrincipal, sha256Hex, shareTokenFrom, trustedHeaders } from './auth.ts'
+import { handleAdminStats } from './admin.ts'
 import { acceptInvite, getInvitePublic, handleInvitesCollection, revokeInvite, sendMentionEmails } from './invites.ts'
 import type { EmailEnv } from '../email.ts'
 import { captureServerEvent, type AnalyticsServerEnv } from '../analytics-server.ts'
@@ -106,6 +107,11 @@ export async function handleApi(request: Request): Promise<Response | null> {
 
   if (url.pathname === '/api/agents' || url.pathname.startsWith('/api/agents/')) {
     return handleAgents(db, request, url)
+  }
+
+  if (url.pathname === '/api/admin/stats') {
+    if (request.method !== 'GET') return json({ error: 'method-not-allowed' }, 405)
+    return handleAdminStats(db, await resolvePrincipal(request, db))
   }
 
   if (url.pathname === '/api/notifications' || url.pathname === '/api/notifications/read') {
