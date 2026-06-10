@@ -159,6 +159,7 @@ vi.mock('../../lib/api.ts', () => ({
   listSuggestions: () => Promise.resolve([]),
   listMembers: () => Promise.resolve([]),
   listDocs: () => Promise.resolve([]),
+  listFolders: () => Promise.resolve([]),
   assetUrl: () => '',
   createDoc: () => Promise.resolve(DOC_META),
   createNamedVersion: () => Promise.resolve({}),

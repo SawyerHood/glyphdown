@@ -21,8 +21,10 @@ import { docVaultId } from '../lib/vaults.ts'
  * client-side from the folders list (folderId → parent chain → vault root)
  * and both sections filter to it. Docs whose vault is not derivable (e.g. a
  * doc shared directly out of someone else's vault) stay visible in every
- * scope — hiding them everywhere would lose them entirely. Server-side
- * search stays vault-agnostic; the Worker filter is a planned fast-follow.
+ * scope — hiding them everywhere would lose them entirely. Full-text search
+ * passes `vault=` so the Worker scopes BEFORE its result limit (a post-limit
+ * client filter would lose hits); the client-side filter stays as a belt for
+ * the cached/title section and for stale active-vault races.
  */
 
 const SEARCH_DEBOUNCE_MS = 250
@@ -93,8 +95,8 @@ function SwitcherPanel({ onClose }: { onClose: () => void }) {
   }, [query])
 
   const searchQuery = useQuery({
-    queryKey: ['search', debounced],
-    queryFn: () => searchDocs(debounced),
+    queryKey: ['search', debounced, activeVault?.id ?? null],
+    queryFn: () => searchDocs(debounced, activeVault?.id),
     enabled: debounced.length > 0,
     staleTime: 10_000,
   })

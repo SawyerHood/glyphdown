@@ -1,14 +1,17 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, Copy, Trash2, UserPlus } from 'lucide-react'
+import { Check, Copy, Link2, Trash2, UserPlus } from 'lucide-react'
 import type { Role } from '@glyphdown/protocol'
 import {
   ApiError,
   addFolderMember,
   createFolderInvite,
+  createFolderShareLink,
   listFolderInvites,
   listFolderMembers,
+  listFolderShareLinks,
   removeFolderMember,
+  revokeFolderShareLink,
   revokeInvite,
   type FolderInfo,
   type InviteResult,
@@ -26,11 +29,10 @@ const GRANTABLE: ReadonlyArray<{ value: Role; label: string }> = [
 
 /**
  * Owner-only sharing UI for a VAULT — the doc ShareDialog's flow on the
- * vault's folder root (a grant there covers every doc in the vault): invites
- * by email + member role editing. No share-links section: folder share
- * tokens have no web landing surface yet (doc URLs accept them, but there is
- * nothing to link a whole vault to), so offering one here would copy a dead
- * URL.
+ * vault's folder root (a grant there covers every doc in the vault): share
+ * links (copying the /f/:folderId landing URL — anyone with the link browses
+ * the whole vault at the link's role, anonymous capped at viewer), invites
+ * by email, and member role editing.
  */
 export default function VaultShareDialog({
   vault,
@@ -42,6 +44,8 @@ export default function VaultShareDialog({
   onClose: () => void
 }) {
   const queryClient = useQueryClient()
+  const [linkRole, setLinkRole] = useState<Role>('viewer')
+  const [copiedToken, setCopiedToken] = useState<string | null>(null)
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteRole, setInviteRole] = useState<Role>('editor')
   const [inviteResult, setInviteResult] = useState<InviteResult | null>(null)
@@ -51,6 +55,12 @@ export default function VaultShareDialog({
     queryKey: ['folder-members', vault.id],
     queryFn: () => listFolderMembers(vault.id),
     enabled: open,
+  })
+  const linksQuery = useQuery({
+    queryKey: ['folder-share-links', vault.id],
+    queryFn: () => listFolderShareLinks(vault.id),
+    enabled: open,
+    retry: false,
   })
   // Pending email invites (owner-only endpoint — this dialog is owner-only).
   const invitesQuery = useQuery({
@@ -63,7 +73,33 @@ export default function VaultShareDialog({
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ['folder-members', vault.id] })
     void queryClient.invalidateQueries({ queryKey: ['folder-invites', vault.id] })
+    void queryClient.invalidateQueries({ queryKey: ['folder-share-links', vault.id] })
   }
+
+  // The copyable URL is the landing page: anyone with it (signed in or not)
+  // browses the vault's subtree there and opens docs with the token along.
+  const shareUrl = (token: string) => `${window.location.origin}/f/${vault.id}?share=${token}`
+  const copyLink = async (token: string) => {
+    try {
+      await navigator.clipboard.writeText(shareUrl(token))
+      setCopiedToken(token)
+      setTimeout(() => setCopiedToken(null), 2000)
+    } catch {
+      // clipboard unavailable — the URL is still visible in the row
+    }
+  }
+  const createLink = useMutation({
+    mutationFn: () => createFolderShareLink(vault.id, linkRole),
+    onSuccess: (link) => {
+      track('vault_shared', { role: link.role, via: 'share-link' })
+      invalidate()
+      void copyLink(link.token)
+    },
+  })
+  const revokeLink = useMutation({
+    mutationFn: (token: string) => revokeFolderShareLink(vault.id, token),
+    onSuccess: invalidate,
+  })
 
   // Invite by email — works for non-users too (they get an email + landing link).
   const invite = useMutation({
@@ -118,6 +154,43 @@ export default function VaultShareDialog({
       <p className="m-0 mb-5 text-xs text-[var(--ink-soft)]">
         People you share this vault with get access to <strong>every document inside it</strong>, including new ones.
       </p>
+
+      {/* Share links — copy the /f/:folderId landing URL */}
+      <section className="mb-5">
+        <h3 className="island-kicker m-0 mb-2 flex items-center gap-1">
+          <Link2 size={11} /> Share links
+        </h3>
+        <div className="mb-2 flex items-center gap-2">
+          <span className="text-sm text-[var(--ink-soft)]">Anyone with the link</span>
+          <Select value={linkRole} onChange={setLinkRole} options={GRANTABLE} />
+          <Button variant="primary" size="sm" disabled={createLink.isPending} onClick={() => createLink.mutate()}>
+            Create link
+          </Button>
+        </div>
+        {linksQuery.isLoading ? (
+          <Spinner />
+        ) : (linksQuery.data ?? []).length === 0 ? (
+          <p className="m-0 text-xs text-[var(--ink-faint)]">No active links.</p>
+        ) : (
+          <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+            {(linksQuery.data ?? []).map((link) => (
+              <li key={link.token} className="flex items-center gap-2 rounded-md border border-[var(--line)] px-2 py-1.5">
+                <Badge tone="blue">{link.role}</Badge>
+                <code className="min-w-0 flex-1 truncate text-[11px] text-[var(--ink-soft)]">{shareUrl(link.token)}</code>
+                <Button size="sm" variant="ghost" onClick={() => void copyLink(link.token)} title="Copy URL">
+                  {copiedToken === link.token ? <Check size={13} /> : <Copy size={13} />}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => revokeLink.mutate(link.token)} title="Revoke link">
+                  <Trash2 size={13} />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="m-0 mt-1 text-[11px] text-[var(--ink-faint)]">
+          Links open a browsable view of the whole vault. Visitors who aren&rsquo;t signed in can only view.
+        </p>
+      </section>
 
       {/* Invite */}
       <section className="mb-5">

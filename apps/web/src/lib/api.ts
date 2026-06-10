@@ -4,6 +4,7 @@ import type {
   Comment,
   CommentReply,
   DocMeta,
+  FolderListingResponse,
   FolderMeta,
   Principal,
   Role,
@@ -195,6 +196,15 @@ export const moveFolder = (id: string, parentId: string | null) => updateFolder(
 export const deleteFolder = (id: string) =>
   request<{ ok: true }>(`/api/folders/${encodeURIComponent(id)}`, { method: 'DELETE' })
 
+/**
+ * The folder share-link landing page's read (/f/:folderId): the folder plus
+ * its whole live subtree. The ONE folder read that takes a share token —
+ * anonymous visitors on a folder/vault link read through it (viewer-capped),
+ * signed-in visitors get max(own grants, link role).
+ */
+export const getFolderListing = (folderId: string, share?: string) =>
+  request<FolderListingResponse>(`/api/folders/${encodeURIComponent(folderId)}/listing`, { share })
+
 // ---------------------------------------------------------------------------
 // Vaults (root namespaces — see protocol VaultMeta; the switcher derives its
 // list from ['folders'], these are the mutation routes)
@@ -214,9 +224,15 @@ export const deleteVault = (id: string) =>
 // Search & backlinks
 // ---------------------------------------------------------------------------
 
-/** Full-text search over the caller's accessible docs (snippets carry «hit» markers). */
-export const searchDocs = (q: string) =>
-  request<{ results: SearchResult[] }>(`/api/search?q=${encodeURIComponent(q)}`).then((r) => r.results)
+/**
+ * Full-text search over the caller's accessible docs (snippets carry «hit»
+ * markers). `vault` narrows to that vault's subtree server-side — BEFORE the
+ * result limit, so scoped results aren't lossy.
+ */
+export const searchDocs = (q: string, vault?: string) =>
+  request<{ results: SearchResult[] }>(
+    `/api/search?q=${encodeURIComponent(q)}${vault ? `&vault=${encodeURIComponent(vault)}` : ''}`,
+  ).then((r) => r.results)
 
 /** Docs (visible to the caller) whose bodies wiki-link [[this doc's title]]. */
 export const listBacklinks = (docId: string, share?: string) =>
@@ -263,6 +279,19 @@ export const addFolderMember = (folderId: string, input: { email?: string; agent
 
 export const removeFolderMember = (folderId: string, principalId: string) =>
   request<{ ok: true }>(folderPath(folderId, `/members/${encodeURIComponent(principalId)}`), { method: 'DELETE' })
+
+// Folder share links (the vault share dialog's Links section): same routes as
+// doc links one level up — a link on a vault root covers its whole subtree.
+// The copyable URL is the landing page: /f/<folderId>?share=<token>.
+
+export const listFolderShareLinks = (folderId: string) =>
+  request<{ shareLinks: ShareLinkInfo[] }>(folderPath(folderId, '/share-links')).then((r) => r.shareLinks)
+
+export const createFolderShareLink = (folderId: string, role: Role) =>
+  request<ShareLinkInfo>(folderPath(folderId, '/share-links'), { method: 'POST', body: { role } })
+
+export const revokeFolderShareLink = (folderId: string, token: string) =>
+  request<{ ok: true }>(folderPath(folderId, `/share-links/${encodeURIComponent(token)}`), { method: 'DELETE' })
 
 // ---------------------------------------------------------------------------
 // Email invites (work for non-users too — they get an /invite/<token> email)

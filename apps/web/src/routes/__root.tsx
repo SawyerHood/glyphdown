@@ -102,6 +102,9 @@ function RootDocument({ children }: { children: React.ReactNode }) {
   const isLogin = pathname === '/login' || pathname.startsWith('/login/')
   const isLanding = pathname === '/' && session === null
   const isInvite = pathname.startsWith('/invite/')
+  // Folder/vault share-link landing (/f/:folderId) brings its own minimal
+  // header and may render with no session at all — no shell, no tree.
+  const isFolderShare = pathname.startsWith('/f/')
   const isEditor = pathname.startsWith('/d/')
 
   return (
@@ -113,7 +116,7 @@ function RootDocument({ children }: { children: React.ReactNode }) {
       <body className="font-sans antialiased">
         <QueryClientProvider client={queryClient}>
           <AppErrorBoundary>
-            {isLogin || isLanding || isInvite ? (
+            {isLogin || isLanding || isInvite || isFolderShare ? (
               children
             ) : (
               <FileTreeShell floatingToggle={isEditor}>
@@ -121,7 +124,7 @@ function RootDocument({ children }: { children: React.ReactNode }) {
                 {children}
               </FileTreeShell>
             )}
-            {isLogin || isInvite ? null : <QuickSwitcher />}
+            {isLogin || isInvite || isFolderShare ? null : <QuickSwitcher />}
           </AppErrorBoundary>
         </QueryClientProvider>
         <Scripts />
