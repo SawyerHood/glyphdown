@@ -35,6 +35,7 @@ import { useActiveVault } from '../lib/useActiveVault.ts'
 import { useDismissable } from '../lib/useDismissable.ts'
 import { useFileMutations, useTransientToast } from '../lib/useFileMutations.ts'
 import { ConfirmDialog, Dialog } from './ui.tsx'
+import VaultSwitcher from './VaultSwitcher.tsx'
 
 /**
  * Obsidian-style file tree: one tree where every doc always exists — folders
@@ -313,10 +314,16 @@ export default function FileTree({ onClose }: { onClose: () => void }) {
         )}
       </div>
 
+      {/* Pinned footer: the vault switcher (dropdown opens upward). The tree
+          above lists EVERY vault as a root; this controls the ACTIVE vault
+          (Cmd+K scoping, the `/` redirect, where new docs land) without
+          navigating away from the open doc. */}
+      <VaultSwitcher variant="sidebar" />
+
       {toast ? (
         <div
           role="status"
-          className="pointer-events-none absolute bottom-3 left-1/2 z-10 max-w-[90%] -translate-x-1/2 rounded-md bg-[var(--ink)] px-2.5 py-1.5 text-center text-xs text-[var(--paper)] shadow-lg"
+          className="pointer-events-none absolute bottom-14 left-1/2 z-10 max-w-[90%] -translate-x-1/2 rounded-md bg-[var(--ink)] px-2.5 py-1.5 text-center text-xs text-[var(--paper)] shadow-lg"
         >
           {toast}
         </div>
@@ -354,7 +361,7 @@ function FolderItem({ node, depth, ctx }: { node: TreeFolderNode; depth: number;
   const { folder } = node
   const isOwner = folder.role === 'owner'
   // Vaults are immovable roots: they never drag, and they leave the tree only
-  // through the dedicated vault-delete flow (header switcher), not the ⋯ menu.
+  // through the dedicated vault-delete flow (vault switcher), not the ⋯ menu.
   const isVault = folder.kind === 'vault'
   const expanded = !ctx.collapsed[folder.id]
   const renamingThis = ctx.renaming?.kind === 'folder' && ctx.renaming.folder.id === folder.id
@@ -513,7 +520,7 @@ function FolderItem({ node, depth, ctx }: { node: TreeFolderNode; depth: number;
                     onSelect: () => ctx.setRenaming({ kind: 'folder', folder }),
                   },
                   ...(isVault
-                    ? [] // vault delete = the typed-confirmation flow in the header switcher
+                    ? [] // vault delete = the typed-confirmation flow in the vault switcher
                     : [
                         {
                           label: 'Delete',

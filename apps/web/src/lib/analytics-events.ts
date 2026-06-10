@@ -16,7 +16,7 @@ export interface AnalyticsEvents {
   /** A document was created (file tree / browser, or a wiki-link create-on-open). */
   doc_created: { docId: string; source: 'file-tree' | 'wiki-link' }
   folder_created: Record<string, never>
-  /** A vault was created from the header switcher. */
+  /** A vault was created from the vault switcher. */
   vault_created: Record<string, never>
   /** A vault (and its whole subtree, to trash) was deleted. */
   vault_deleted: Record<string, never>

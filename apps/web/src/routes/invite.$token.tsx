@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link, createFileRoute, useNavigate, useRouterState } from '@tanstack/react-router'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { FileText, Folder, MailOpen, MailX, Vault } from 'lucide-react'
+import { FileText, Folder, FolderRoot, MailOpen, MailX } from 'lucide-react'
 import { ApiError, acceptInvite, getInvite } from '../lib/api.ts'
 import { track } from '../lib/analytics.ts'
 import { Button, Spinner } from '../components/ui.tsx'
@@ -99,7 +99,7 @@ function InvitePage() {
               {invite.targetType === 'doc' ? (
                 <FileText size={20} />
               ) : invite.targetKind === 'vault' ? (
-                <Vault size={20} />
+                <FolderRoot size={20} />
               ) : (
                 <Folder size={20} />
               )}

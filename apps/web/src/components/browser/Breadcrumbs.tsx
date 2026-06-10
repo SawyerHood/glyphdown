@@ -1,16 +1,20 @@
 import type { DragEvent } from 'react'
 import { Link } from '@tanstack/react-router'
-import { ChevronRight, Home, Vault } from 'lucide-react'
+import { ChevronRight, Home, FolderRoot } from 'lucide-react'
 import type { FolderInfo } from '../../lib/api.ts'
+import VaultSwitcher from '../VaultSwitcher.tsx'
 
 /**
  * Drive-style breadcrumb trail for the home file browser, ROOTED AT THE
  * VAULT: the chain's top folder (the vault) is the first crumb — there is no
  * "Home"/account-root crumb above it, because the root level holds only
- * vaults and nothing lives there. Every segment except the current one is a
- * navigation link AND a drop target — dragging a doc/folder row onto a crumb
- * moves it there, stopping at the vault root (the canonical "move up"
- * gesture in a one-folder-at-a-time browser).
+ * vaults and nothing lives there. At the vault root the crumb IS the vault
+ * switcher (heading-sized trigger; pick / create / share / delete); deeper
+ * in, the vault crumb is a plain link back to the root, where the switcher
+ * lives. Every segment except the current one is a navigation link AND a
+ * drop target — dragging a doc/folder row onto a crumb moves it there,
+ * stopping at the vault root (the canonical "move up" gesture in a
+ * one-folder-at-a-time browser).
  *
  * Drop validity beyond what's gated here (same-scope no-ops, cycles) is
  * enforced by the guarded moves in useFileMutations, so a stray drop is a
@@ -80,17 +84,20 @@ export default function Breadcrumbs({
       {chain.map((folder, i) => {
         const isCurrent = i === chain.length - 1
         // The vault crumb gets the vault glyph; nested crumbs stay text-only.
-        const icon = i === 0 ? <Vault size={14} className="shrink-0" aria-hidden /> : null
+        const icon = i === 0 ? <FolderRoot size={14} className="shrink-0" aria-hidden /> : null
         return (
           <span key={folder.id} className="flex min-w-0 items-center gap-0.5">
             {i > 0 ? <ChevronRight size={13} aria-hidden className="shrink-0 text-[var(--ink-faint)]" /> : null}
-            {isCurrent ? (
+            {isCurrent && i === 0 && folder.kind === 'vault' ? (
+              // At the vault root the crumb IS the switcher trigger.
+              <VaultSwitcher variant="heading" />
+            ) : isCurrent ? (
               <span
                 aria-current="page"
                 title={folder.name}
                 className="flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-sm font-semibold text-[var(--ink)]"
               >
-                {i === 0 ? <Vault size={14} className="shrink-0 text-[var(--ink-soft)]" aria-hidden /> : null}
+                {i === 0 ? <FolderRoot size={14} className="shrink-0 text-[var(--ink-soft)]" aria-hidden /> : null}
                 <span className="truncate">{folder.name}</span>
               </span>
             ) : (

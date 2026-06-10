@@ -1,6 +1,6 @@
 import { Link, createFileRoute } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { ChevronRight, FileText, Folder, FolderX, PenLine, Vault } from 'lucide-react'
+import { ChevronRight, FileText, Folder, FolderRoot, FolderX, PenLine } from 'lucide-react'
 import type { DocMeta, FolderMeta } from '@glyphdown/protocol'
 import { ApiError, fetchMe, getFolderListing } from '../lib/api.ts'
 import { breadcrumbChain, folderListing } from '../lib/browse.ts'
@@ -150,7 +150,7 @@ function SubtreeBrowser({
             {i > 0 ? <ChevronRight size={13} className="text-[var(--ink-faint)]" /> : null}
             {i === chain.length - 1 ? (
               <span className="flex items-center gap-1.5 font-semibold text-[var(--ink)]">
-                {crumb.kind === 'vault' ? <Vault size={14} className="text-[var(--accent)]" /> : <Folder size={14} />}
+                {crumb.kind === 'vault' ? <FolderRoot size={14} className="text-[var(--accent)]" /> : <Folder size={14} />}
                 {crumb.name}
               </span>
             ) : (
@@ -160,7 +160,7 @@ function SubtreeBrowser({
                 search={{ ...docSearch, ...(crumb.id !== root.id ? { folder: crumb.id } : {}) }}
                 className="flex items-center gap-1.5 font-medium text-[var(--ink-soft)] no-underline hover:text-[var(--accent)]"
               >
-                {crumb.kind === 'vault' ? <Vault size={14} className="text-[var(--accent)]" /> : <Folder size={14} />}
+                {crumb.kind === 'vault' ? <FolderRoot size={14} className="text-[var(--accent)]" /> : <Folder size={14} />}
                 {crumb.name}
               </Link>
             )}

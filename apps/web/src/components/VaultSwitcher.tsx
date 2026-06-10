@@ -1,28 +1,37 @@
 import { useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, ChevronDown, Plus, Trash2, UserPlus, Vault } from 'lucide-react'
+import { Check, ChevronDown, FolderRoot, Plus, Trash2, UserPlus } from 'lucide-react'
 import { ApiError, createVault, deleteVault, listFolders, type FolderInfo } from '../lib/api.ts'
 import { listVaults, pickDefaultVault, setStoredVaultId } from '../lib/vaults.ts'
-import { useActiveVault } from '../lib/useActiveVault.ts'
+import { overrideActiveVault, useActiveVault } from '../lib/useActiveVault.ts'
 import { useDismissable } from '../lib/useDismissable.ts'
 import { track } from '../lib/analytics.ts'
 import { Badge, Button, Dialog, Input } from './ui.tsx'
 import VaultShareDialog from './VaultShareDialog.tsx'
 
 /**
- * Header vault switcher: the active vault's name opens a dropdown listing
- * every vault the user can see — owned first, shared with a role badge —
- * plus inline "New vault" creation and, for an owned active vault, the share
- * and delete flows. Switching navigates to the vault's listing
- * (`/?folder=<vaultId>`) and persists the choice (lib/vaults.ts), and the
- * active vault itself follows the URL (lib/useActiveVault.ts) so shared
- * links select the vault they live in.
+ * The vault switcher: the active vault's name opens a dropdown listing every
+ * vault the user can see — owned first, shared with a role badge — plus
+ * inline "New vault" creation and, for an owned active vault, the share and
+ * delete flows.
+ *
+ * Two placements share all of that:
+ * - `heading` — the file browser's breadcrumb ROOT (the vault crumb itself is
+ *   the trigger). Switching navigates to the picked vault's listing
+ *   (`/?folder=<vaultId>`) and persists the choice (lib/vaults.ts); the
+ *   active vault follows the URL (lib/useActiveVault.ts) so shared links
+ *   select the vault they live in.
+ * - `sidebar` — pinned at the BOTTOM of the editor's file-tree panel, where
+ *   there is no file browser. The dropdown opens UPWARD, and switching does
+ *   NOT navigate away from the open doc: it changes the active vault in
+ *   place (overrideActiveVault) so Cmd+K scoping, the `/` redirect and new
+ *   docs follow the choice.
  *
  * Hidden until a vault exists (brand-new accounts get `Home` on signup or
  * with their first doc).
  */
-export default function VaultSwitcher() {
+export default function VaultSwitcher({ variant }: { variant: 'heading' | 'sidebar' }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [open, setOpen] = useState(false)
@@ -45,32 +54,46 @@ export default function VaultSwitcher() {
     setCreating(false)
   }
   const switchTo = (vault: FolderInfo) => {
-    setStoredVaultId(vault.id)
     close()
+    if (variant === 'sidebar') {
+      // Stay on the open doc — just change which vault is "active".
+      overrideActiveVault(vault.id)
+      return
+    }
+    setStoredVaultId(vault.id)
     void navigate({ to: '/', search: { folder: vault.id } })
   }
 
   return (
-    <div ref={ref} className="relative min-w-0">
+    <div ref={ref} className={variant === 'sidebar' ? 'relative shrink-0 border-t border-[var(--line)] p-2' : 'relative min-w-0'}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         title={`Vault: ${active.name}`}
         aria-haspopup="menu"
         aria-expanded={open}
-        className={`flex min-w-0 max-w-44 items-center gap-1.5 rounded-md px-2 py-1.5 text-sm font-medium transition hover:bg-[var(--paper-soft)] ${
-          open ? 'bg-[var(--paper-soft)] text-[var(--ink)]' : 'text-[var(--ink-soft)] hover:text-[var(--ink)]'
-        }`}
+        className={
+          variant === 'sidebar'
+            ? `flex w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[13px] font-medium transition hover:bg-[var(--paper-soft)] ${
+                open ? 'bg-[var(--paper-soft)] text-[var(--ink)]' : 'text-[var(--ink)]'
+              }`
+            : `flex min-w-0 max-w-72 items-center gap-1.5 rounded-md px-2 py-1 text-sm font-semibold text-[var(--ink)] transition hover:bg-[var(--paper-soft)] ${
+                open ? 'bg-[var(--paper-soft)]' : ''
+              }`
+        }
       >
-        <Vault size={14} className="shrink-0 text-[var(--accent)]" />
-        <span className="truncate">{active.name}</span>
+        <FolderRoot size={14} className="shrink-0 text-[var(--accent)]" />
+        <span className={variant === 'sidebar' ? 'min-w-0 flex-1 truncate' : 'truncate'}>{active.name}</span>
         <ChevronDown size={13} className="shrink-0 text-[var(--ink-faint)]" />
       </button>
 
       {open ? (
         <div
           role="menu"
-          className="absolute left-0 top-full z-50 mt-1 w-60 rounded-lg border border-[var(--line)] bg-[var(--paper)] p-1 shadow-lg"
+          className={`absolute left-0 z-50 w-60 rounded-lg border border-[var(--line)] bg-[var(--paper)] p-1 shadow-lg ${
+            // Sidebar footer: open upward so the menu stays on-screen.
+            variant === 'sidebar' ? 'bottom-full mb-1 ml-1' : 'top-full mt-1'
+          }`}
         >
           <p className="island-kicker m-0 px-2 pb-1 pt-1.5">Vaults</p>
           {vaults.map((vault) => (
@@ -81,7 +104,7 @@ export default function VaultSwitcher() {
               onClick={() => switchTo(vault)}
               className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-[var(--ink)] hover:bg-[var(--paper-soft)]"
             >
-              <Vault size={13} className="shrink-0 text-[var(--ink-faint)]" />
+              <FolderRoot size={13} className="shrink-0 text-[var(--ink-faint)]" />
               <span className="min-w-0 flex-1 truncate">{vault.name}</span>
               {vault.role !== 'owner' ? <Badge tone="blue">{vault.role}</Badge> : null}
               {vault.id === active.id ? <Check size={13} className="shrink-0 text-[var(--accent)]" /> : null}
@@ -193,7 +216,7 @@ function NewVaultRow({
   return (
     <div className="px-2 py-1.5">
       <div className="flex items-center gap-1.5">
-        <Vault size={13} className="shrink-0 text-[var(--ink-faint)]" />
+        <FolderRoot size={13} className="shrink-0 text-[var(--ink-faint)]" />
         <input
           autoFocus
           value={name}
