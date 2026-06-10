@@ -18,7 +18,7 @@ import { SKILL_MD } from './skill-content.gen.ts'
 import { parseDocRef } from './docref.ts'
 import { CliError, DEGENERATE_MESSAGE } from './errors.ts'
 import { clone, syncWorkspace } from './mirror.ts'
-import { type SyncAction, type SyncDocResult, pullFolder, pushAll, readFolderConfig, syncExitCode } from './sync.ts'
+import { type SyncAction, type SyncDocResult, pullFolder, pushAll, readFolderConfig, resolveVault, syncExitCode } from './sync.ts'
 import { findWorkspace, listMetas, recordBase, rewriteMeta, slugify, workspaceRoot, writePull } from './workspace.ts'
 
 export { DEGENERATE_MESSAGE }
@@ -197,6 +197,24 @@ export function createProgram(deps: ProgramDeps = {}): Command {
       for (const d of docs) out(`${pc.dim(d.id)}  ${d.role.padEnd(9)}  ${d.title}`)
     })
 
+  // -- vaults -------------------------------------------------------------------
+  program
+    .command('vaults')
+    .description('vaults you own or that are shared with you (name, id, your role)')
+    .option('--json', 'machine-readable output')
+    .action(async (opts: { json?: boolean }) => {
+      const vaults = await apiFor().listVaults()
+      if (opts.json) {
+        out(JSON.stringify(vaults, null, 2))
+        return
+      }
+      if (vaults.length === 0) {
+        out('no vaults')
+        return
+      }
+      for (const v of vaults) out(`${pc.dim(v.id)}  ${v.role.padEnd(9)}  ${v.name}`)
+    })
+
   // -- cat --------------------------------------------------------------------
   program
     .command('cat')
@@ -218,15 +236,21 @@ export function createProgram(deps: ProgramDeps = {}): Command {
   // -- new --------------------------------------------------------------------
   program
     .command('new')
-    .description('create a doc (the name is slugified into its filename); prints its id and URL')
+    .description('create a doc (the name is slugified into its filename); prints its id and URL. With neither --folder nor --vault it lands in your default vault')
     .argument('<name>', 'doc name — slugified into <slug>.md (collisions get -2, -3, …)')
-    .option('--folder <folderId>')
+    .option('--folder <folderId>', 'create inside this folder')
+    .option('--vault <vault>', "create at a vault's top level (vault name or id)")
     .option('--json', 'machine-readable output')
-    .action(async (name: string, opts: { folder?: string; json?: boolean }) => {
+    .action(async (name: string, opts: { folder?: string; vault?: string; json?: boolean }) => {
+      if (opts.folder && opts.vault) throw new CliError(1, 'use either --folder or --vault, not both')
       const requested = `${slugify(name.replace(/\.md$/i, ''))}.md`
-      const meta = await apiFor().createDoc({
+      const api = apiFor()
+      // A vault IS a folder — resolve the ref (name/id, via /api/vaults) to
+      // its folder id and create there.
+      const folderId = opts.vault ? (await resolveVault(api, opts.vault)).id : opts.folder
+      const meta = await api.createDoc({
         filename: requested,
-        ...(opts.folder ? { folderId: opts.folder } : {}),
+        ...(folderId ? { folderId } : {}),
       })
       const url = `${config().serverUrl.replace(/\/+$/, '')}/d/${meta.id}`
       if (opts.json) {
@@ -282,20 +306,29 @@ export function createProgram(deps: ProgramDeps = {}): Command {
   // -- clone ------------------------------------------------------------------
   program
     .command('clone')
-    .description('mirror every folder and doc you can access into a local workspace')
-    .argument('[dir]', 'target directory (default: ./glyphdown)')
-    .action(async (dirArg: string | undefined) => {
+    .description('mirror every folder and doc you can access into a local workspace; --vault scopes it to one vault')
+    .argument('[dir]', 'target directory (default: ./glyphdown, or ./<vault slug> with --vault)')
+    .option('--vault <vault>', 'clone a single vault (name or id) instead of the whole account')
+    .action(async (dirArg: string | undefined, opts: { vault?: string }) => {
       const serverUrl = config().serverUrl
+      const api = apiFor()
+      const vault = opts.vault !== undefined ? await resolveVault(api, opts.vault) : undefined
       const result = await clone({
-        api: apiFor(),
+        api,
         serverUrl,
         ...(dirArg !== undefined ? { dir: dirArg } : {}),
         cwd: cwd(),
+        ...(vault !== undefined ? { vault: { id: vault.id, name: vault.name } } : {}),
         out,
         err: errOut,
       })
-      out(`cloned ${result.folders} folder(s), ${result.docs} doc(s) → ${result.dir}`)
-      out(pc.dim('workspace recorded in .glyphdown/workspace.json — run `glyphdown sync` to keep it mirrored'))
+      if (vault !== undefined) {
+        out(`cloned vault ${pc.bold(vault.name)}: ${result.folders} folder(s), ${result.docs} doc(s) → ${result.dir}`)
+        out(pc.dim('vault recorded in .glyphdown/folder.json — run `glyphdown sync` to keep it mirrored (scoped to this vault)'))
+      } else {
+        out(`cloned ${result.folders} folder(s), ${result.docs} doc(s) → ${result.dir}`)
+        out(pc.dim('workspace recorded in .glyphdown/workspace.json — run `glyphdown sync` to keep it mirrored'))
+      }
       if (result.failures > 0) throw new CliError(1, `clone: ${result.failures} item(s) failed`)
     })
 
@@ -306,7 +339,7 @@ export function createProgram(deps: ProgramDeps = {}): Command {
     .argument('[doc]', 'doc id or URL (with --folder: the target directory instead)')
     .argument('[path]', 'target file (default: <slug-of-title>.md)')
     .option('--clean', 'pull the clean view (pending suggested insertions stripped)')
-    .option('--folder <folderRef>', 'pull every non-deleted doc in a folder (id or exact name)')
+    .option('--folder <folderRef>', 'pull every non-deleted doc in a folder (id or exact name; vault names/ids work too — a vault IS a folder)')
     .action(async (doc: string | undefined, pathArg: string | undefined, opts: { clean?: boolean; folder?: string }) => {
       const serverUrl = config().serverUrl
 

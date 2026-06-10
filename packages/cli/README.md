@@ -95,10 +95,28 @@ files are updated so you can keep editing and push again without re-pulling.
 | 3 | degenerate push refused: "doc has concurrent edits and your change rewrites most of it — re-pull or --force" | re-pull and redo, or `--force` if the rewrite is intentional |
 | 1 | anything else (auth, network, bad args) | read stderr |
 
+## Vaults
+
+Every doc lives in exactly one **vault** — an Obsidian-style root namespace
+(a special root folder). Your account's top level contains only vaults, and a
+whole vault can be shared with a person or agent at a role.
+
+```sh
+glyphdown vaults [--json]        # vaults you own or that are shared with you: id, role, name
+glyphdown clone --vault Research # mirror ONE vault as a workspace (default dir: ./<vault-slug>)
+glyphdown new "Findings" --vault Research   # create at the vault's top level
+```
+
+`--vault` accepts a vault name (case-insensitive — vault names are unique per
+owner) or id; a name carried by both an owned and a shared vault is ambiguous
+and errors with the candidate ids. `glyphdown new` with **neither `--folder`
+nor `--vault`** creates the doc in your server-side **default vault** (the
+`Home` vault unless you changed it).
+
 ## Mirror workflow (clone + sync)
 
-Mirror **everything you can access** — the full nested folder tree, every doc,
-every image asset — and keep it converged:
+Mirror **everything you can access** — every vault, the full nested folder
+tree, every doc, every image asset — and keep it converged:
 
 ```sh
 glyphdown clone [dir]  # default dir: ./glyphdown
@@ -110,9 +128,17 @@ glyphdown sync               # true two-way mirror, recursive
 `glyphdown clone` materializes each accessible folder as a nested directory
 (slugified name; sibling collisions get `-2`, `-3`, …; folders whose parent
 you cannot access are promoted to the root), pulls each doc into its folder's
-directory (root-level docs land in the workspace root), and downloads each
-folder's assets alongside its docs. Cloning into an existing workspace is an
-error — run `glyphdown sync` there instead.
+directory, and downloads each folder's assets alongside its docs. Vaults are
+root folders, so they appear as the workspace's top-level directories.
+Cloning into an existing workspace is an error — run `glyphdown sync` there
+instead.
+
+`glyphdown clone --vault <name|id> [dir]` scopes the same mirror to one
+vault: the vault's direct docs land in the workspace root, its subfolders
+nest below, and everything outside the vault is ignored — by `clone` AND by
+every later `glyphdown sync` in that workspace. (Mechanically it is a folder
+workspace rooted at the vault: the root gets `.glyphdown/folder.json`, not
+`workspace.json`.)
 
 `glyphdown sync` then reconciles the whole tree, sequentially (rate limits):
 
@@ -198,7 +224,8 @@ glyphdown sync                             # two-way reconcile (+ discover new f
 ```
 
 `glyphdown pull --folder <folderRef>` accepts a folder id or its exact name (an
-ambiguous name errors and lists the candidate ids). Every non-deleted doc in
+ambiguous name errors and lists the candidate ids); a vault IS a folder, so
+vault names (case-insensitive) and ids work here too. Every non-deleted doc in
 the folder lands under its canonical server filename (local-only collisions
 get `-2`, `-3`, …) with the
 usual `.glyphdown/<docId>/` base bookkeeping, plus `.glyphdown/folder.json`
@@ -282,13 +309,14 @@ glyphdown comment abc123 --resolve c42                # resolve (add --body to r
 ## Other commands
 
 ```sh
-glyphdown new "Launch Plan" [--folder f]   # create a doc; prints id + URL
+glyphdown vaults [--json]                  # vaults you can reach: id, role, name
+glyphdown new "Launch Plan" [--folder f | --vault v]  # create a doc; prints id + URL (neither flag: your default vault)
 glyphdown snapshot abc123 -m "pre-rewrite" # named version (do this before big pushes)
 ```
 
 ## JSON output
 
-Every read command (`list`, `cat`, `comments`, `suggestions`, `new`) takes
+Every read command (`list`, `vaults`, `cat`, `comments`, `suggestions`, `new`) takes
 `--json` for machine-readable output, and `glyphdown sync --json` emits the per-doc
 result records. Other write commands print short human-readable
 confirmations; rely on the exit code.

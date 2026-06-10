@@ -166,9 +166,17 @@ export function folderChildren(folders: FolderMeta[]): Map<string | null, Folder
 export interface CloneOptions {
   api: Api
   serverUrl: string
-  /** Target directory, cwd-relative (default: ./glyphdown). */
+  /** Target directory, cwd-relative (default: ./glyphdown, or ./<vault slug> with `vault`). */
   dir?: string
   cwd: string
+  /**
+   * Scope the clone to one vault's subtree (`glyphdown clone --vault`). The
+   * workspace root links to the vault via `.glyphdown/folder.json` — the same
+   * layout `pull --folder` writes — so `glyphdown sync`'s existing
+   * rootFolderConfig path confines the workspace to the subtree for free
+   * (workspace.json is NOT written; it would force account-wide scope).
+   */
+  vault?: { id: string; name: string }
   out: (line: string) => void
   err: (line: string) => void
 }
@@ -185,14 +193,20 @@ export interface CloneResult {
  * Mirror everything the caller can access: the folder tree as nested
  * directories (slugified names, sibling-collision suffixes), every doc pulled
  * into its folder's directory (root-level docs into the workspace root), and
- * every folder's assets downloaded alongside its docs.
+ * every folder's assets downloaded alongside its docs. With `vault`, the
+ * mirror is scoped to that vault's subtree: its child folders become the
+ * top-level directories, its direct docs land in the workspace root, and
+ * everything outside the vault is skipped.
  */
 export async function clone(opts: CloneOptions): Promise<CloneResult> {
-  const root = resolve(opts.cwd, opts.dir ?? 'glyphdown')
+  const root = resolve(opts.cwd, opts.dir ?? (opts.vault ? slugify(opts.vault.name) : 'glyphdown'))
   if (isWorkspace(root)) {
     throw new CliError(1, `${root} is already a Glyphdown workspace — run \`glyphdown sync\` there instead of re-cloning`)
   }
   mkdirSync(root, { recursive: true })
+
+  /** Scope root: the vault's folder id, or null for the account mirror. */
+  const rootKey: string | null = opts.vault?.id ?? null
 
   const folders = await opts.api.listFolders()
   const docs = await opts.api.listDocs()
@@ -204,7 +218,7 @@ export async function clone(opts: CloneOptions): Promise<CloneResult> {
   const dirByFolderId = new Map<string, { abs: string; rel: string }>()
   const usedByDir = new Map<string, Set<string>>()
   const seen = new Set<string>()
-  const queue = (children.get(null) ?? []).map((f) => ({ folder: f, parentAbs: root, parentRel: '', depth: 1 }))
+  const queue = (children.get(rootKey) ?? []).map((f) => ({ folder: f, parentAbs: root, parentRel: '', depth: 1 }))
   while (queue.length > 0) {
     const { folder, parentAbs, parentRel, depth } = queue.shift()!
     if (seen.has(folder.id)) continue // cycle guard (the server prevents cycles)
@@ -231,13 +245,22 @@ export async function clone(opts: CloneOptions): Promise<CloneResult> {
   }
 
   // Docs: into their folder's dir; root-level docs (and docs whose folder is
-  // not accessible) into the workspace root. Sequential — rate limits.
+  // not accessible) into the workspace root — except in a vault clone, where
+  // the root holds the VAULT's direct docs and out-of-scope docs are skipped
+  // (matching syncWorkspace's subtree scoping). Sequential — rate limits.
   let docCount = 0
   const usedFilesByDir = new Map<string, Set<string>>()
   const rootDocIds: string[] = []
   for (const doc of [...docs].sort((a, b) => a.title.localeCompare(b.title))) {
-    const target = (doc.folderId !== null ? dirByFolderId.get(doc.folderId) : undefined) ?? { abs: root, rel: '' }
-    if (target.abs === root) rootDocIds.push(doc.id)
+    let target: { abs: string; rel: string }
+    if (opts.vault) {
+      const mapped = doc.folderId === rootKey ? { abs: root, rel: '' } : dirByFolderId.get(doc.folderId ?? '')
+      if (!mapped) continue // outside the vault's subtree
+      target = mapped
+    } else {
+      target = (doc.folderId !== null ? dirByFolderId.get(doc.folderId) : undefined) ?? { abs: root, rel: '' }
+      if (target.abs === root) rootDocIds.push(doc.id)
+    }
     let used = usedFilesByDir.get(target.abs)
     if (!used) {
       used = usedFileSlugs(target.abs)
@@ -266,16 +289,27 @@ export async function clone(opts: CloneOptions): Promise<CloneResult> {
   }
 
   // Assets: per folder (folder namespace) and per root doc (own namespace).
+  // A vault clone's root IS a folder namespace — the vault's.
   for (const [folderId, { abs, rel }] of dirByFolderId) {
     const results = await pullAssets({ dir: abs, ops: folderAssetOps(opts.api, folderId, null), err: opts.err })
     failures += reportAssetPulls(results, rel, opts)
+  }
+  if (opts.vault) {
+    const results = await pullAssets({ dir: root, ops: folderAssetOps(opts.api, opts.vault.id, null), err: opts.err })
+    failures += reportAssetPulls(results, '', opts)
   }
   for (const docId of rootDocIds) {
     const results = await pullAssets({ dir: root, ops: docAssetOps(opts.api, docId), err: opts.err })
     failures += reportAssetPulls(results, '', opts)
   }
 
-  writeWorkspaceConfig(root, { version: 1, serverUrl: opts.serverUrl, clonedAt: Date.now() })
+  // A vault workspace is rooted by folder.json (the pull --folder layout) so
+  // sync scopes to the subtree; a full mirror is marked by workspace.json.
+  if (opts.vault) {
+    writeFolderConfig(root, { folderId: opts.vault.id, folderName: opts.vault.name, serverUrl: opts.serverUrl })
+  } else {
+    writeWorkspaceConfig(root, { version: 1, serverUrl: opts.serverUrl, clonedAt: Date.now() })
+  }
   return { dir: root, folders: dirByFolderId.size, docs: docCount, failures }
 }
 

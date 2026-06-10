@@ -23,17 +23,37 @@ Resolution order: `GLYPHDOWN_API_KEY` env → `GLYPHDOWN_SERVER` env → the con
 | `glyphdown login [--key <key>] [--server <url>]` | store an API key (agents) or device-code sign-in (humans) |
 | `glyphdown logout` | remove stored credentials (revokes the session server-side when possible) |
 | `glyphdown list [--json]` | docs you can access: id, your role, title |
+| `glyphdown vaults [--json]` | vaults you own or that are shared with you: id, your role, name |
 | `glyphdown cat <doc> [--clean] [--json]` | print a doc to stdout (`--clean` strips pending suggested insertions) |
-| `glyphdown new <name> [--folder <folderId>] [--json]` | create a doc (name slugified into `<slug>.md`); prints id + URL |
+| `glyphdown new <name> [--folder <folderId> \| --vault <vault>] [--json]` | create a doc (name slugified into `<slug>.md`); prints id + URL. Neither flag → your default vault |
 | `glyphdown mv <file> <new-name>` | rename a tracked doc: local file AND server filename together |
-| `glyphdown clone [dir]` | mirror every accessible folder/doc into a workspace (default `./glyphdown`) |
-| `glyphdown pull [doc] [path] [--clean] [--folder <folderRef>]` | pull one doc — or a whole folder by id/exact name |
+| `glyphdown clone [dir] [--vault <vault>]` | mirror every accessible folder/doc — or one vault's subtree — into a workspace (default `./glyphdown`, or `./<vault-slug>` with `--vault`) |
+| `glyphdown pull [doc] [path] [--clean] [--folder <folderRef>]` | pull one doc — or a whole folder by id/exact name (vault names/ids work: a vault IS a folder) |
 | `glyphdown push [path] [--all] [--suggest] [--force] [-m <note>]` | merge local file edits into the live doc through the CRDT |
 | `glyphdown sync [dir] [--force] [--json]` | two-way mirror sync of the whole workspace |
 | `glyphdown comments <doc> [--json]` | list open comment threads with anchor quotes |
 | `glyphdown comment <doc> --body <b> [--reply <id>] [--resolve <id>] [--line <n>]` | add / reply / resolve comments |
 | `glyphdown suggestions <doc> [--json]` | list open suggestions with their +/− parts |
 | `glyphdown snapshot <doc> -m <msg>` | create a named version (do this before big pushes) |
+
+## Vaults
+
+Every doc lives in exactly one **vault** — an Obsidian-style root namespace (a
+special root folder; the account's top level contains only vaults). A whole
+vault can be shared with you at a role, so check `glyphdown vaults` to see
+what you can reach.
+
+- `--vault <vault>` (on `new` and `clone`) takes a vault **name
+  (case-insensitive)** or **id**. Vault names are unique per owner; when an
+  owned and a shared vault share a name the CLI errors and lists the ids —
+  pass the id.
+- `glyphdown new` with neither `--folder` nor `--vault` creates the doc in the
+  key owner's **default vault** (`Home` unless changed) — fine for scratch
+  docs, but prefer an explicit `--vault`/`--folder` when the user named a
+  place.
+- `glyphdown clone --vault <vault>` makes a workspace confined to that vault:
+  clone AND every later `sync` in it ignore everything outside the vault.
+  A full `glyphdown clone` shows vaults as the top-level directories.
 
 ## Workspace anatomy
 
@@ -44,8 +64,8 @@ work/                          # clone root
     <docId>/meta.json          # {docId, serverUrl, baseHash, pulledAt, file, versionId?}
     <docId>/base.md            # the merge base — NEVER edit this
     assets.json                # image sync state {filename: {etag, size, mtimeMs}}
-  launch-plan.md               # root-level doc (canonical server filename, verbatim)
-  team/
+  launch-plan.md               # doc in the workspace root (canonical server filename, verbatim)
+  team/                        # vaults and folders alike — one dir per server folder
     .glyphdown/folder.json     # {folderId, folderName, serverUrl} — dir ↔ folder, keyed by id
     .glyphdown/<docId>/...     # per-doc bookkeeping, same shape everywhere
     plan.md
@@ -55,6 +75,7 @@ work/                          # clone root
 - **Never edit anything under `.glyphdown/`** — `base.md` is the three-way merge base; corrupting it corrupts every future push. (Workspaces from the pre-rename `ink` CLI use `.ink/` instead; both are honored, never migrated.)
 - **Filenames are canonical slugs**: a doc's server name is `[a-z0-9-]+.md`, and that IS the local file name on every machine. The `# heading` inside is just content — never a name source. Messy new-file names slugify on creation (`My Notes.md → my-notes.md`, the local file renames to match).
 - A `glyphdown pull --folder` directory is a valid mirror subtree as-is; `glyphdown sync` detects the shape (workspace.json → account mirror, folder.json → folder subtree, bare doc metas → single-dir) and recurses.
+- A vault clone (`glyphdown clone --vault`) is a folder workspace rooted at the vault: the workspace root carries `folder.json` (pointing at the vault's folder id) instead of `workspace.json`, which is exactly what scopes sync to the vault's subtree.
 
 ## The three-way base model
 
@@ -220,6 +241,7 @@ glyphdown comment <doc> --resolve c42                    # resolve; add --body t
 ## JSON output shapes
 
 - `glyphdown list --json` → `[{id, filename, title, folderId, ownerUserId, role, createdAt, updatedAt}]`
+- `glyphdown vaults --json` → `[{id, name, ownerUserId, role, createdAt}]`
 - `glyphdown cat <doc> --json` → `{docId, view, text, versionId}`
 - `glyphdown new <name> --json` → the doc meta plus `url`
 - `glyphdown sync --json` → `[{docId, file, action, failedHunks?, message?}]` — one record per doc AND per folder action (folder actions use the folder id as `docId` and `dir/` as `file`). Asset outcomes ride stderr/human output, not the JSON.
