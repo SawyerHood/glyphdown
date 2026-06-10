@@ -223,6 +223,7 @@ describe('GET /api/invites/:token — public landing payload', () => {
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({
       targetType: 'doc',
+      targetKind: 'doc',
       targetName: 'roadmap',
       inviterName: 'Owner',
       role: 'commenter',

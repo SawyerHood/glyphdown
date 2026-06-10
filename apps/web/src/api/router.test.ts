@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import Database from 'better-sqlite3'
 import { drizzle } from 'drizzle-orm/better-sqlite3'
-import type { DocMeta, FolderMeta } from '@glyphdown/protocol'
+import type { DocMeta, FolderMeta, VaultMeta } from '@glyphdown/protocol'
 import type { Db } from '../db/client.ts'
 
 /**
@@ -480,5 +480,195 @@ describe('POST /api/docs/:id/restore', () => {
 
     seedDoc('d-live', 'alice', 'b.md', 'v1')
     expect((await api('/api/docs/d-live/restore', { method: 'POST', headers }))!.status).toBe(409)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// /api/vaults (Phase 2)
+// ---------------------------------------------------------------------------
+
+function grantFolder(folderId: string, principalId: string, role: string): void {
+  raw.prepare(
+    `INSERT INTO folder_members (folder_id, principal_id, principal_type, role, created_at) VALUES (?, ?, 'user', ?, 1)`,
+  ).run(folderId, principalId, role)
+}
+
+function setDefaultVault(userId: string, vaultId: string): void {
+  raw.prepare(`INSERT INTO user_prefs (user_id, default_vault_id) VALUES (?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET default_vault_id = excluded.default_vault_id`).run(userId, vaultId)
+}
+
+describe('GET /api/vaults', () => {
+  it('lists owned vaults oldest-first plus directly granted vaults with the effective role', async () => {
+    const headers = principalFor('alice')
+    principalFor('carol')
+    raw.prepare(`INSERT INTO folders (id, owner_user_id, name, kind, parent_id, created_at) VALUES
+      ('v-work', 'alice', 'Work', 'vault', NULL, 2),
+      ('v-home', 'alice', 'Home', 'vault', NULL, 1),
+      ('v-carol', 'carol', 'Shared', 'vault', NULL, 5),
+      ('f-sub', 'alice', 'Sub', 'folder', 'v-home', 3)`).run()
+    grantFolder('v-carol', 'alice', 'editor')
+
+    const { vaults } = await jsonOf<{ vaults: VaultMeta[] }>(await api('/api/vaults', { headers }))
+    expect(vaults.map((v) => [v.id, v.role])).toEqual([
+      ['v-home', 'owner'],
+      ['v-work', 'owner'],
+      ['v-carol', 'editor'],
+    ])
+    // Plain folders never leak into the vault list.
+    expect(vaults.some((v) => v.id === 'f-sub')).toBe(false)
+  })
+
+  it('a grant on a SUBFOLDER does not surface its vault (direct grants only)', async () => {
+    principalFor('alice')
+    const bob = principalFor('bob')
+    seedVault('v1', 'alice')
+    seedFolder('f1', 'alice', 'v1')
+    grantFolder('f1', 'bob', 'viewer')
+    const { vaults } = await jsonOf<{ vaults: VaultMeta[] }>(await api('/api/vaults', { headers: bob }))
+    expect(vaults).toEqual([])
+  })
+})
+
+describe('POST /api/vaults', () => {
+  it('creates a root folder row with kind=vault', async () => {
+    const headers = principalFor('alice')
+    const meta = await jsonOf<VaultMeta>(
+      await api('/api/vaults', { method: 'POST', headers, body: JSON.stringify({ name: 'Research' }) }),
+    )
+    expect(meta).toMatchObject({ name: 'Research', ownerUserId: 'alice', role: 'owner' })
+    expect(raw.prepare(`SELECT kind, parent_id FROM folders WHERE id = ?`).get(meta.id)).toEqual({
+      kind: 'vault',
+      parent_id: null,
+    })
+  })
+
+  it('409s name-taken on a case-insensitive collision per owner; other owners are unaffected', async () => {
+    const headers = principalFor('alice')
+    seedVault('v1', 'alice', 'Research')
+    const res = await api('/api/vaults', { method: 'POST', headers, body: JSON.stringify({ name: 'research' }) })
+    expect(res!.status).toBe(409)
+    expect(await jsonOf<{ error: string }>(res)).toEqual({ error: 'name-taken' })
+
+    const bob = principalFor('bob')
+    expect((await api('/api/vaults', { method: 'POST', headers: bob, body: JSON.stringify({ name: 'Research' }) }))!.status).toBe(200)
+  })
+
+  it('400s on a missing/blank name', async () => {
+    const headers = principalFor('alice')
+    for (const body of [{}, { name: '' }, { name: '   ' }]) {
+      const res = await api('/api/vaults', { method: 'POST', headers, body: JSON.stringify(body) })
+      expect(res!.status).toBe(400)
+      expect(await jsonOf<{ error: string }>(res)).toEqual({ error: 'bad-name' })
+    }
+  })
+})
+
+describe('PATCH /api/vaults/:id', () => {
+  it('renames (owner-only) with the same case-insensitive 409 guard', async () => {
+    const headers = principalFor('alice')
+    seedVault('v1', 'alice')
+    seedVault('v2', 'alice', 'Work')
+    const ok = await api('/api/vaults/v2', { method: 'PATCH', headers, body: JSON.stringify({ name: 'Projects' }) })
+    expect(await jsonOf<VaultMeta>(ok)).toMatchObject({ id: 'v2', name: 'Projects' })
+
+    const clash = await api('/api/vaults/v2', { method: 'PATCH', headers, body: JSON.stringify({ name: 'home' }) })
+    expect(clash!.status).toBe(409)
+    expect(await jsonOf<{ error: string }>(clash)).toEqual({ error: 'name-taken' })
+
+    // Case-only self-rename stays allowed.
+    expect((await api('/api/vaults/v2', { method: 'PATCH', headers, body: JSON.stringify({ name: 'projects' }) }))!.status).toBe(200)
+  })
+
+  it('rejects moves, non-owners, and non-vault ids', async () => {
+    const headers = principalFor('alice')
+    const bob = principalFor('bob')
+    seedVault('v1', 'alice')
+    seedFolder('f1', 'alice', 'v1')
+    grantFolder('v1', 'bob', 'editor')
+
+    const move = await api('/api/vaults/v1', { method: 'PATCH', headers, body: JSON.stringify({ name: 'X', parentId: 'f1' }) })
+    expect(move!.status).toBe(400)
+    expect(await jsonOf<{ error: string }>(move)).toEqual({ error: 'vault-immovable' })
+
+    // Members (even editors) cannot rename — owner-only like folder PATCH.
+    expect((await api('/api/vaults/v1', { method: 'PATCH', headers: bob, body: JSON.stringify({ name: 'Mine' }) }))!.status).toBe(403)
+    // A plain folder is not addressable through the vault routes.
+    expect((await api('/api/vaults/f1', { method: 'PATCH', headers, body: JSON.stringify({ name: 'X' }) }))!.status).toBe(404)
+  })
+})
+
+describe('DELETE /api/vaults/:id', () => {
+  it('blocks the last vault and the default vault with distinct codes', async () => {
+    const headers = principalFor('alice')
+    seedVault('v1', 'alice')
+    const last = await api('/api/vaults/v1', { method: 'DELETE', headers })
+    expect(last!.status).toBe(400)
+    expect(await jsonOf<{ error: string }>(last)).toEqual({ error: 'last-vault' })
+
+    seedVault('v2', 'alice', 'Work')
+    setDefaultVault('alice', 'v1')
+    const dflt = await api('/api/vaults/v1', { method: 'DELETE', headers })
+    expect(dflt!.status).toBe(400)
+    expect(await jsonOf<{ error: string }>(dflt)).toEqual({ error: 'default-vault' })
+  })
+
+  it('is owner-only (members cannot delete)', async () => {
+    principalFor('alice')
+    const bob = principalFor('bob')
+    seedVault('v1', 'alice')
+    seedVault('v2', 'alice', 'Work')
+    setDefaultVault('alice', 'v1')
+    grantFolder('v2', 'bob', 'editor')
+    expect((await api('/api/vaults/v2', { method: 'DELETE', headers: bob }))!.status).toBe(403)
+  })
+
+  it('soft-deletes the entire doc subtree, hard-deletes the folder rows, and tears down each doc DO', async () => {
+    const headers = principalFor('alice')
+    seedVault('v1', 'alice')
+    seedVault('v2', 'alice', 'Work')
+    setDefaultVault('alice', 'v1')
+    seedFolder('f1', 'alice', 'v2')
+    seedFolder('f2', 'alice', 'f1')
+    seedDoc('d-top', 'alice', 'top.md', 'v2')
+    seedDoc('d-deep', 'alice', 'deep.md', 'f2')
+    seedDoc('d-trashed', 'alice', 'old.md', 'f1', 777) // already in the trash
+    seedDoc('d-other', 'alice', 'other.md', 'v1') // a different vault — untouched
+    grantFolder('v2', 'bob', 'editor')
+
+    const res = await api('/api/vaults/v2', { method: 'DELETE', headers })
+    expect(res!.status).toBe(200)
+
+    // Docs: every live doc in the closure is trashed; pre-trashed keeps its
+    // original deleted_at; other vaults are untouched.
+    const deletedAt = (id: string) => (raw.prepare(`SELECT deleted_at FROM docs WHERE id = ?`).get(id) as { deleted_at: number | null }).deleted_at
+    expect(deletedAt('d-top')).not.toBeNull()
+    expect(deletedAt('d-deep')).not.toBeNull()
+    expect(deletedAt('d-trashed')).toBe(777)
+    expect(deletedAt('d-other')).toBeNull()
+
+    // Folders: the whole subtree is gone, grants included.
+    expect(raw.prepare(`SELECT COUNT(*) AS n FROM folders WHERE id IN ('v2','f1','f2')`).get()).toEqual({ n: 0 })
+    expect(raw.prepare(`SELECT COUNT(*) AS n FROM folder_members WHERE folder_id = 'v2'`).get()).toEqual({ n: 0 })
+    expect(raw.prepare(`SELECT COUNT(*) AS n FROM folders WHERE id = 'v1'`).get()).toEqual({ n: 1 })
+
+    // Each live doc's DO was told doc-deleted (closes every connection,
+    // members included) — exactly like a single-doc delete.
+    const teardowns = h.doCalls.filter((c) => c.ns === 'DocDO' && c.path === '/admin/doc-deleted')
+    expect(teardowns.map((c) => c.name).sort()).toEqual(['d-deep', 'd-top'])
+  })
+
+  it('restore after a vault delete re-homes the doc into the default vault', async () => {
+    const headers = principalFor('alice')
+    seedVault('v1', 'alice')
+    seedVault('v2', 'alice', 'Work')
+    setDefaultVault('alice', 'v1')
+    seedDoc('d1', 'alice', 'notes.md', 'v2')
+    seedDoc('d-clash', 'alice', 'notes.md', 'v1') // forces suffixing on restore
+
+    expect((await api('/api/vaults/v2', { method: 'DELETE', headers }))!.status).toBe(200)
+    const meta = await jsonOf<DocMeta>(await api('/api/docs/d1/restore', { method: 'POST', headers }))
+    expect(meta).toMatchObject({ folderId: 'v1', filename: 'notes-2.md' })
+    expect(raw.prepare(`SELECT deleted_at FROM docs WHERE id = 'd1'`).get()).toEqual({ deleted_at: null })
   })
 })

@@ -161,15 +161,22 @@ const ROLE_PHRASE: Record<string, string> = {
   editor: 'edit it',
 }
 
-function targetNoun(targetType: 'doc' | 'folder'): string {
-  return targetType === 'doc' ? 'document' : 'folder'
+/**
+ * What the share target is called in copy. 'vault' is a folder-target share
+ * whose folder is a vault root (the caller resolves the kind — this module
+ * never reads the database).
+ */
+export type ShareTargetNoun = 'doc' | 'folder' | 'vault'
+
+function targetNoun(targetType: ShareTargetNoun): string {
+  return targetType === 'doc' ? 'document' : targetType
 }
 
 /** Invite to a non-user: sign up via the tokenized landing page. */
 export function inviteEmail(opts: {
   inviterName: string
   targetName: string
-  targetType: 'doc' | 'folder'
+  targetType: ShareTargetNoun
   role: string
   url: string
 }): Omit<EmailMessage, 'to'> {
@@ -191,7 +198,7 @@ export function inviteEmail(opts: {
 export function addedEmail(opts: {
   inviterName: string
   targetName: string
-  targetType: 'doc' | 'folder'
+  targetType: ShareTargetNoun
   role: string
   url: string
 }): Omit<EmailMessage, 'to'> {

@@ -176,6 +176,18 @@ export type ClientMessage = { t: 'suggestion-upsert'; suggestion: SuggestionReco
 //          the legacy X-Inkroom-* names are echoed alongside for one release
 //          so outdated `ink` binaries keep working)
 // POST   /api/docs/:id/push                   -> PushRequest -> PushResponse
+// GET    /api/vaults                          -> { vaults: VaultMeta[] } (owned vaults + vaults with a DIRECT
+//                                                folder_members grant on the vault root, with the effective role)
+// POST   /api/vaults                          -> { name } -> VaultMeta (409 `name-taken` on a case-insensitive
+//                                                collision with another of the caller's vaults)
+// PATCH  /api/vaults/:id                      -> { name } -> VaultMeta (rename ONLY, owner-only; same 409
+//                                                `name-taken` guard; vaults never move — a parentId is rejected
+//                                                with 400 `vault-immovable`)
+// DELETE /api/vaults/:id                      -> { ok } (owner-only; soft-deletes EVERY doc in the vault's
+//                                                subtree into the 30-day trash and hard-deletes the subtree's
+//                                                folder rows, so restore re-homes docs into the default vault.
+//                                                400 `last-vault` / `default-vault` protect the caller's only
+//                                                vault and their default vault)
 // GET    /api/folders                         -> { folders: FolderMeta[] } (owned + granted + descendants of granted)
 // POST   /api/folders                         -> { name, parentId } -> FolderMeta (parent required and caller-owned —
 //                                                its chain must terminate in a vault; depth-capped)
@@ -278,6 +290,22 @@ export interface FolderMeta {
   name: string
   kind: FolderKind
   parentId: string | null
+  ownerUserId: string
+  role: Role
+  createdAt: number
+}
+
+/**
+ * Vault row from the /api/vaults surface. A vault IS a folder row (kind =
+ * 'vault', parentId null) — these routes are thin wrappers that enforce the
+ * vault invariants — so this is FolderMeta minus the fields a vault pins
+ * (kind, parentId). `role` is owner for owned vaults, else the caller's max
+ * DIRECT grant on the vault root (a grant on a subfolder shares that subtree,
+ * not the vault).
+ */
+export interface VaultMeta {
+  id: string
+  name: string
   ownerUserId: string
   role: Role
   createdAt: number
