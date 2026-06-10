@@ -136,6 +136,8 @@ function setupDb(): Db {
     CREATE TABLE assets (id TEXT PRIMARY KEY, folder_id TEXT, doc_id TEXT, filename TEXT NOT NULL,
       r2_key TEXT NOT NULL, content_type TEXT NOT NULL, size INTEGER NOT NULL, etag TEXT NOT NULL,
       created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
+    CREATE TABLE docs (id TEXT PRIMARY KEY, title TEXT NOT NULL, filename TEXT NOT NULL DEFAULT '',
+      folder_id TEXT, owner_user_id TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER);
     CREATE UNIQUE INDEX assets_folder_filename_idx ON assets (folder_id, filename);
     CREATE UNIQUE INDEX assets_doc_filename_idx ON assets (doc_id, filename);
   `)

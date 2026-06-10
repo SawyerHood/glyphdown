@@ -24,6 +24,7 @@ const doc = (id: string, title: string, folderId: string | null = null): DocMeta
 const folder = (id: string, name: string, parentId: string | null = null): FolderInfo => ({
   id,
   name,
+  kind: parentId === null ? 'vault' : 'folder',
   parentId,
   ownerUserId: 'u1',
   role: 'owner',

@@ -123,12 +123,15 @@ describe('validateMove — depth cap', () => {
   })
 
   it('counts the moved SUBTREE height, not just the folder', () => {
-    // sub1 -> sub2 -> sub3 (height 3), target at depth 8: 8 + 3 = 11 > 10.
-    const chain = chainOf(8)
+    // sub1 -> sub2 -> sub3 (height 3), target at depth MAX-2: (MAX-2) + 3 > MAX.
+    const chain = chainOf(MAX_FOLDER_DEPTH - 2)
     const sub = chainOf(3, 'sub')
-    expect(validateMove([...chain, ...sub], 'sub1', 'f8')).toEqual({ ok: false, reason: 'too-deep' })
-    // At depth 7 it fits exactly: 7 + 3 = 10.
-    expect(validateMove([...chain, ...sub], 'sub1', 'f7')).toEqual({ ok: true })
+    expect(validateMove([...chain, ...sub], 'sub1', `f${MAX_FOLDER_DEPTH - 2}`)).toEqual({
+      ok: false,
+      reason: 'too-deep',
+    })
+    // One level higher it fits exactly: (MAX-3) + 3 = MAX.
+    expect(validateMove([...chain, ...sub], 'sub1', `f${MAX_FOLDER_DEPTH - 3}`)).toEqual({ ok: true })
   })
 })
 

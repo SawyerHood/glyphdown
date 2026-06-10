@@ -82,7 +82,8 @@ function availableIn(state: FakeServer, folderId: string | null, requested: stri
 }
 
 export function folder(id: string, name: string, parentId: string | null = null): FolderMeta {
-  return { id, name, parentId, ownerUserId: 'u1', role: 'owner', createdAt: 1 }
+  // Mirrors the post-vaults server shape: root rows are vaults.
+  return { id, name, kind: parentId === null ? 'vault' : 'folder', parentId, ownerUserId: 'u1', role: 'owner', createdAt: 1 }
 }
 
 export function jsonResponse(body: unknown, status = 200): Response {

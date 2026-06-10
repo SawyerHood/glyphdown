@@ -34,7 +34,7 @@ function setupDb(): Db {
     CREATE TABLE agents (id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, name TEXT NOT NULL,
       key_hash TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'inherit', created_at INTEGER NOT NULL, revoked_at INTEGER);
     CREATE TABLE folders (id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, name TEXT NOT NULL,
-      parent_id TEXT, created_at INTEGER NOT NULL);
+      kind TEXT NOT NULL DEFAULT 'folder', parent_id TEXT, created_at INTEGER NOT NULL);
     CREATE TABLE docs (id TEXT PRIMARY KEY, title TEXT NOT NULL, filename TEXT NOT NULL DEFAULT '',
       folder_id TEXT, owner_user_id TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER);
     CREATE TABLE doc_members (doc_id TEXT NOT NULL, principal_id TEXT NOT NULL, principal_type TEXT NOT NULL,
@@ -46,7 +46,7 @@ function setupDb(): Db {
       accepted_at INTEGER, accepted_by TEXT, revoked_at INTEGER);
     CREATE TABLE notifications (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, type TEXT NOT NULL,
       payload_json TEXT NOT NULL, created_at INTEGER NOT NULL, read_at INTEGER);
-    CREATE TABLE user_prefs (user_id TEXT PRIMARY KEY, email_notifications INTEGER NOT NULL DEFAULT 1);
+    CREATE TABLE user_prefs (user_id TEXT PRIMARY KEY, email_notifications INTEGER NOT NULL DEFAULT 1, default_vault_id TEXT);
   `)
   // Seed: owner + an existing member-to-be + a doc + a folder.
   sqlite.exec(`

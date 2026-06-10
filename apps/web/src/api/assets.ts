@@ -1,4 +1,4 @@
-import { and, eq, isNull } from 'drizzle-orm'
+import { and, eq, inArray, isNull } from 'drizzle-orm'
 import {
   MAX_ASSET_BYTES,
   normalizeAssetFilename,
@@ -7,7 +7,7 @@ import {
   type Role,
   type UploadAssetResponse,
 } from '@glyphdown/protocol'
-import { assets } from '../db/schema.ts'
+import { assets, docs } from '../db/schema.ts'
 import type { Db } from '../db/client.ts'
 import type { AuthContext } from './auth.ts'
 import type { DocRow } from './roles.ts'
@@ -19,6 +19,15 @@ import type { DocRow } from './roles.ts'
  * `![](name.png)` references stay valid across the folder — else the doc
  * itself. Pure helpers (normalizeAssetFilename, uniqueAssetFilename,
  * assetScopeFor) are unit-tested in assets.test.ts.
+ *
+ * LEGACY DOC-SCOPED ROWS (vaults plan §1): pre-vault root docs got doc-scoped
+ * asset rows; the backfill re-homed those docs into a vault WITHOUT moving
+ * their asset rows (two root docs may each own `image.png` — merging the
+ * namespaces would collide and force CRDT content rewrites). Folder-scope
+ * reads therefore FALL BACK to doc scope: a folder-scope hit always wins, the
+ * fallback searches the doc-scoped rows of the doc(s) homed in the folder,
+ * and new uploads always use the current (folder) scope. Stored r2_key values
+ * are immutable, so the bytes never move.
  */
 
 // Shared with the CLI via @glyphdown/protocol (single normalization source).
@@ -80,6 +89,60 @@ async function findAssetRow(db: Db, scope: AssetScope, filename: string): Promis
   )[0]
 }
 
+/** Deterministic pick among legacy rows sharing a filename: oldest first. */
+function byAge(a: AssetRow, b: AssetRow): number {
+  return a.createdAt - b.createdAt || a.id.localeCompare(b.id)
+}
+
+/**
+ * Doc ids whose legacy doc-scoped asset rows resolve through a folder scope:
+ * the live docs homed directly in the folder (a doc's namespace is its
+ * DIRECT folder — subfolder docs have their own).
+ */
+async function fallbackDocIdsFor(db: Db, folderId: string): Promise<string[]> {
+  const rows = await db
+    .select({ id: docs.id })
+    .from(docs)
+    .where(and(eq(docs.folderId, folderId), isNull(docs.deletedAt)))
+  return rows.map((r) => r.id)
+}
+
+async function fallbackRows(db: Db, docIds: string[], filename?: string): Promise<AssetRow[]> {
+  if (docIds.length === 0) return []
+  const base = and(inArray(assets.docId, docIds), isNull(assets.folderId))
+  const where = filename !== undefined ? and(base, eq(assets.filename, filename)) : base
+  return (await db.select().from(assets).where(where)).sort(byAge)
+}
+
+/**
+ * Resolve an asset by filename for read/delete: the scope's own row wins; on
+ * a folder-scope miss, fall back to the legacy doc-scoped rows of the given
+ * docs (oldest row wins when two legacy namespaces share a filename — same
+ * order the merged listing uses).
+ */
+async function resolveAssetRow(
+  db: Db,
+  scope: AssetScope,
+  filename: string,
+  fallbackDocIds: string[],
+): Promise<AssetRow | undefined> {
+  const hit = await findAssetRow(db, scope, filename)
+  if (hit || scope.kind !== 'folder') return hit
+  return (await fallbackRows(db, fallbackDocIds, filename))[0]
+}
+
+/** Scope listing merged with the legacy doc-scoped fallback (scope wins per filename). */
+async function listAssetRowsMerged(db: Db, scope: AssetScope, fallbackDocIds: string[]): Promise<AssetRow[]> {
+  const own = await listAssetRows(db, scope)
+  if (scope.kind !== 'folder' || fallbackDocIds.length === 0) return own
+  const byName = new Map<string, AssetRow>()
+  for (const row of await fallbackRows(db, fallbackDocIds)) {
+    if (!byName.has(row.filename)) byName.set(row.filename, row)
+  }
+  for (const row of own) byName.set(row.filename, row)
+  return [...byName.values()]
+}
+
 function assetMeta(row: AssetRow): AssetMeta {
   return {
     id: row.id,
@@ -111,9 +174,12 @@ export async function handleDocAssets(
   subPath: string,
 ): Promise<Response> {
   const scope = assetScopeFor(doc)
+  // A folder-scoped doc may predate vaults: its own legacy doc-scoped rows
+  // still resolve (reads/deletes only — uploads use the current scope).
+  const fallbackIds = scope.kind === 'folder' ? [doc.id] : []
 
   if (subPath === '/assets' || subPath === '/assets/') {
-    if (request.method === 'GET') return listAssets(db, scope)
+    if (request.method === 'GET') return listAssets(db, scope, fallbackIds)
     if (request.method === 'POST') {
       if (!roleAtLeast(auth.role, 'editor')) return json({ error: 'forbidden' }, 403)
       return uploadAsset(db, bucket, request, url, scope, auth)
@@ -125,10 +191,10 @@ export async function handleDocAssets(
   if (!match) return json({ error: 'not-found' }, 404)
   const filename = safeDecode(match[1]!)
 
-  if (request.method === 'GET') return streamAsset(db, bucket, scope, filename)
+  if (request.method === 'GET') return streamAsset(db, bucket, scope, filename, fallbackIds)
   if (request.method === 'DELETE') {
     if (!roleAtLeast(auth.role, 'editor')) return json({ error: 'forbidden' }, 403)
-    return deleteAsset(db, bucket, scope, filename)
+    return deleteAsset(db, bucket, scope, filename, fallbackIds)
   }
   return json({ error: 'method-not-allowed' }, 405)
 }
@@ -148,24 +214,27 @@ export async function handleFolderAssets(
   role: Role | null,
 ): Promise<Response> {
   const scope: AssetScope = { kind: 'folder', id: folderId }
+  // Legacy doc-scoped rows of docs homed here resolve through this surface
+  // too — the CLI folder sync must see a re-homed doc's pre-vault images.
+  const fallbackIds = await fallbackDocIdsFor(db, folderId)
   if (subPath === '/assets' || subPath === '/assets/') {
-    if (request.method === 'GET') return listAssets(db, scope)
+    if (request.method === 'GET') return listAssets(db, scope, fallbackIds)
     return json({ error: 'method-not-allowed' }, 405)
   }
   const match = subPath.match(/^\/assets\/([^/]+)$/)
   if (!match) return json({ error: 'not-found' }, 404)
   const filename = safeDecode(match[1]!)
-  if (request.method === 'GET') return streamAsset(db, bucket, scope, filename)
+  if (request.method === 'GET') return streamAsset(db, bucket, scope, filename, fallbackIds)
   if (request.method === 'DELETE') {
     // Same gate as the doc-scoped delete (SPEC §4): editor+ only.
     if (role === null || !roleAtLeast(role, 'editor')) return json({ error: 'forbidden' }, 403)
-    return deleteAsset(db, bucket, scope, filename)
+    return deleteAsset(db, bucket, scope, filename, fallbackIds)
   }
   return json({ error: 'method-not-allowed' }, 405)
 }
 
-async function listAssets(db: Db, scope: AssetScope): Promise<Response> {
-  const rows = await listAssetRows(db, scope)
+async function listAssets(db: Db, scope: AssetScope, fallbackDocIds: string[]): Promise<Response> {
+  const rows = await listAssetRowsMerged(db, scope, fallbackDocIds)
   return json({ assets: rows.map(assetMeta) })
 }
 
@@ -227,8 +296,14 @@ async function uploadAsset(
   return json({ asset: assetMeta(row), path: filename } satisfies UploadAssetResponse)
 }
 
-async function streamAsset(db: Db, bucket: R2Bucket, scope: AssetScope, filename: string): Promise<Response> {
-  const row = await findAssetRow(db, scope, filename)
+async function streamAsset(
+  db: Db,
+  bucket: R2Bucket,
+  scope: AssetScope,
+  filename: string,
+  fallbackDocIds: string[],
+): Promise<Response> {
+  const row = await resolveAssetRow(db, scope, filename, fallbackDocIds)
   if (!row) return json({ error: 'not-found' }, 404)
   const object = await bucket.get(row.r2Key)
   if (!object) return json({ error: 'not-found' }, 404) // honest 404: row without bytes
@@ -241,8 +316,14 @@ async function streamAsset(db: Db, bucket: R2Bucket, scope: AssetScope, filename
   return new Response(object.body as unknown as BodyInit, { headers })
 }
 
-async function deleteAsset(db: Db, bucket: R2Bucket, scope: AssetScope, filename: string): Promise<Response> {
-  const row = await findAssetRow(db, scope, filename)
+async function deleteAsset(
+  db: Db,
+  bucket: R2Bucket,
+  scope: AssetScope,
+  filename: string,
+  fallbackDocIds: string[],
+): Promise<Response> {
+  const row = await resolveAssetRow(db, scope, filename, fallbackDocIds)
   if (!row) return json({ error: 'not-found' }, 404)
   await bucket.delete(row.r2Key)
   await db.delete(assets).where(eq(assets.id, row.id))
