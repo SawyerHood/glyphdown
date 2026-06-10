@@ -165,15 +165,25 @@ export type ClientMessage = { t: 'suggestion-upsert'; suggestion: SuggestionReco
 //          { title } payloads are slugified). Renames and folder moves
 //          re-check uniqueness in the target scope and return 409
 //          `filename-taken` on collision — no silent suffixing.
+//          `folderId: null` is rejected (400 `bad-folder`): every doc lives
+//          in a vault's subtree, there is no root scope to move into.
+// POST   /api/docs/:id/restore                -> {} -> DocMeta (owner-only)
+//          Restores a trashed doc. If its folder is gone (or it was trashed
+//          from the pre-vault root), it re-homes into the owner's default
+//          vault; filename collisions in the target scope are suffixed
+//          (-2, -3, …) like create — restore never fails on a name.
 // GET    /api/docs/:id/content?view=...       -> text/markdown (+ X-Glyphdown-Version, X-Glyphdown-Base-Hash;
 //          the legacy X-Inkroom-* names are echoed alongside for one release
 //          so outdated `ink` binaries keep working)
 // POST   /api/docs/:id/push                   -> PushRequest -> PushResponse
 // GET    /api/folders                         -> { folders: FolderMeta[] } (owned + granted + descendants of granted)
-// POST   /api/folders                         -> { name, parentId? } -> FolderMeta (parent must be caller-owned; depth ≤ 10)
+// POST   /api/folders                         -> { name, parentId } -> FolderMeta (parent required and caller-owned —
+//                                                its chain must terminate in a vault; depth-capped)
 // GET    /api/folders/:id                     -> FolderMeta (role = max over the folder's ancestor chain)
-// PATCH  /api/folders/:id                     -> { name?, parentId?: string|null } -> FolderMeta
-//                                                (move = owner-only; 400 `cycle` / `too-deep` on violation)
+// PATCH  /api/folders/:id                     -> { name?, parentId?: string } -> FolderMeta
+//                                                (move = owner-only; 400 `cycle` / `too-deep` on violation;
+//                                                vaults cannot move at all and plain folders cannot move to
+//                                                root — `parentId: null` is rejected with 400)
 // DELETE /api/folders/:id                     -> { ok } (child folders + docs promote to the deleted folder's parent)
 // ...comments/suggestions/versions proxied through to the DO surface above.
 
@@ -249,23 +259,34 @@ export interface SearchResult {
 }
 
 /**
- * Folder row from the /api/folders surface. Folders nest (parentId, null =
- * root) up to MAX_FOLDER_DEPTH levels; a grant (membership or share link) on
- * a folder applies to every doc in its entire subtree, and `role` is the
- * caller's effective role: max(owner, folder_members on the folder or any
- * ancestor).
+ * Folder row from the /api/folders surface. Folders nest (parentId) up to
+ * MAX_FOLDER_DEPTH levels; a grant (membership or share link) on a folder
+ * applies to every doc in its entire subtree, and `role` is the caller's
+ * effective role: max(owner, folder_members on the folder or any ancestor).
+ *
+ * `kind` partitions the tree: every root row (parentId null) is a VAULT — an
+ * Obsidian-style root namespace docs live under — and every non-root row is a
+ * plain `folder`. Vaults cannot be moved or nested, plain folders cannot
+ * become roots, and every doc lives in some vault's subtree.
  */
+export type FolderKind = 'folder' | 'vault'
+
 export interface FolderMeta {
   id: string
   name: string
+  kind: FolderKind
   parentId: string | null
   ownerUserId: string
   role: Role
   createdAt: number
 }
 
-/** Maximum folder nesting depth (a root folder has depth 1). API-enforced. */
-export const MAX_FOLDER_DEPTH = 10
+/**
+ * Maximum folder nesting depth (a root has depth 1). API-enforced. The vault
+ * root consumes a level, so this is 11 — pre-vault trees could legitimately
+ * be 10 deep and gained a vault above them in the backfill.
+ */
+export const MAX_FOLDER_DEPTH = 11
 
 // ---------------------------------------------------------------------------
 // Assets (images stored in R2, scoped to a doc's folder — or the doc itself
