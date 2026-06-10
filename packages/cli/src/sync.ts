@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { join, resolve } from 'node:path'
 import { normalizeEol } from '@glyphdown/core'
 import type { DocMeta, PushResponse } from '@glyphdown/protocol'
-import { type Api, type ContentResult, type FolderMeta, pushWithBase } from './api.ts'
+import { type Api, type ContentResult, type FolderMeta, type VaultMeta, pushWithBase } from './api.ts'
 import { CliError, DEGENERATE_MESSAGE } from './errors.ts'
 import {
   type DocWorkspaceMeta,
@@ -61,12 +61,21 @@ export function writeFolderConfig(dir: string, config: FolderConfig): void {
 // Folder resolution + slug allocation
 // ---------------------------------------------------------------------------
 
-/** Resolve a folder reference — folder id or exact name — via GET /api/folders. */
+/**
+ * Resolve a folder reference — folder id or exact name — via GET /api/folders.
+ * A vault IS a folder, so vault refs work here too: when no exact folder name
+ * matches, vault rows (kind='vault') are retried case-insensitively, matching
+ * how `--vault` resolves names (vault names are unique per owner that way).
+ */
 export async function resolveFolder(api: Api, ref: string): Promise<FolderMeta> {
   const folders = await api.listFolders()
   const byId = folders.find((f) => f.id === ref)
   if (byId) return byId
-  const byName = folders.filter((f) => f.name === ref)
+  let byName = folders.filter((f) => f.name === ref)
+  if (byName.length === 0) {
+    const lower = ref.toLowerCase()
+    byName = folders.filter((f) => f.kind === 'vault' && f.name.toLowerCase() === lower)
+  }
   if (byName.length === 1) return byName[0]!
   if (byName.length > 1) {
     const candidates = byName.map((f) => `  ${f.id}  ${f.name}`).join('\n')
@@ -76,6 +85,30 @@ export async function resolveFolder(api: Api, ref: string): Promise<FolderMeta> 
     1,
     `no folder matches "${ref}" (checked ids and exact names of ${folders.length} accessible folder(s))`,
   )
+}
+
+/**
+ * Resolve a vault reference — vault id or name — via GET /api/vaults (NOT the
+ * generic folder lookup: vault names are unique per owner case-insensitively,
+ * so name matching is case-insensitive here). A name carried by both an owned
+ * and a shared vault is ambiguous — the error lists ids.
+ */
+export async function resolveVault(api: Api, ref: string): Promise<VaultMeta> {
+  const vaults = await api.listVaults()
+  const byId = vaults.find((v) => v.id === ref)
+  if (byId) return byId
+  const lower = ref.toLowerCase()
+  const byName = vaults.filter((v) => v.name.toLowerCase() === lower)
+  if (byName.length === 1) return byName[0]!
+  if (byName.length > 1) {
+    const candidates = byName.map((v) => `  ${v.id}  ${v.name} (${v.role})`).join('\n')
+    throw new CliError(1, `vault name "${ref}" is ambiguous — pass an id instead:\n${candidates}`)
+  }
+  if (vaults.length === 0) {
+    throw new CliError(1, `no vault matches "${ref}" — you have no accessible vaults (run \`glyphdown vaults\`)`)
+  }
+  const known = vaults.map((v) => `  ${v.id}  ${v.name}`).join('\n')
+  throw new CliError(1, `no vault matches "${ref}" — accessible vaults:\n${known}`)
 }
 
 /**

@@ -1,4 +1,4 @@
-import { slugifyDocStem, type DocMeta, type PushRequest, type PushResponse } from '@glyphdown/protocol'
+import { slugifyDocStem, type DocMeta, type PushRequest, type PushResponse, type VaultMeta } from '@glyphdown/protocol'
 import type { FolderMeta } from '../src/index.ts'
 import { createApi, createProgram, md5Hex, sha256Hex, writePull } from '../src/index.ts'
 
@@ -104,6 +104,15 @@ export function fetchFor(state: FakeServer): typeof fetch {
     const path = url.pathname
 
     if (method === 'GET' && path === '/api/folders') return jsonResponse({ folders: state.folders })
+    if (method === 'GET' && path === '/api/vaults') {
+      // Mirrors the real /api/vaults: vault rows (kind='vault') as VaultMeta,
+      // oldest first — FolderMeta minus the fields a vault pins.
+      const vaults = state.folders
+        .filter((f) => f.kind === 'vault')
+        .map(({ id, name, ownerUserId, role, createdAt }): VaultMeta => ({ id, name, ownerUserId, role, createdAt }))
+        .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
+      return jsonResponse({ vaults })
+    }
     if (method === 'POST' && path === '/api/folders') {
       const body = JSON.parse(init?.body as string) as { name?: string; parentId?: string }
       const parentId = body.parentId ?? null

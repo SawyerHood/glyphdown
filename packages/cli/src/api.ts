@@ -10,12 +10,15 @@ import type {
   PushResponse,
   SuggestionRecord,
   UploadAssetResponse,
+  VaultMeta,
   VersionMeta,
 } from '@glyphdown/protocol'
 import { CliError } from './errors.ts'
 
 /** Folder row from GET /api/folders — re-exported so CLI callers get parentId. */
 export type { FolderMeta }
+/** Vault row from GET /api/vaults — re-exported for CLI callers. */
+export type { VaultMeta }
 
 export type ContentView = 'working' | 'clean'
 
@@ -70,6 +73,8 @@ export interface Api {
   getFolder(folderId: string): Promise<FolderMeta>
   /** POST /api/folders — parent must be caller-owned; depth ≤ MAX_FOLDER_DEPTH. */
   createFolder(name: string, parentId?: string): Promise<FolderMeta>
+  /** GET /api/vaults — owned vaults + vaults shared with you, with your role. */
+  listVaults(): Promise<VaultMeta[]>
   getContent(docId: string, view?: ContentView): Promise<ContentResult>
   /**
    * Raw push. Non-2xx responses that carry a PushResponse body (409
@@ -191,6 +196,11 @@ export function createApi(opts: ApiOptions): Api {
 
     createFolder(name, parentId) {
       return requestJson<FolderMeta>('POST', '/api/folders', { name, ...(parentId ? { parentId } : {}) })
+    },
+
+    async listVaults() {
+      const { vaults } = await requestJson<{ vaults: VaultMeta[] }>('GET', '/api/vaults')
+      return vaults
     },
 
     async getContent(docId, view = 'working') {

@@ -1,5 +1,5 @@
 export { createApi, pushWithBase } from './api.ts'
-export type { Api, ApiOptions, AssetDownload, ContentResult, ContentView, FolderMeta, PushOutcome, PushWithBaseOptions } from './api.ts'
+export type { Api, ApiOptions, AssetDownload, ContentResult, ContentView, FolderMeta, PushOutcome, PushWithBaseOptions, VaultMeta } from './api.ts'
 export {
   DEFAULT_SERVER_URL,
   DEVICE_CLIENT_ID,
@@ -60,6 +60,7 @@ export {
   pushRejection,
   readFolderConfig,
   resolveFolder,
+  resolveVault,
   syncAll,
   syncExitCode,
   syncTracked,
