@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Bot, Check, Copy, KeyRound, Mail, Plus } from 'lucide-react'
 import {
@@ -13,6 +13,7 @@ import {
   type MintedAgent,
 } from '../lib/api.ts'
 import { timeAgo } from '../lib/presence.ts'
+import { resetNux } from '../lib/nux.ts'
 import { useSession } from '../lib/session.ts'
 import { Badge, Button, ConfirmDialog, Dialog, EmptyState, Input, Spinner } from '../components/ui.tsx'
 
@@ -35,6 +36,8 @@ function SettingsPage() {
 
 function PreferencesSection() {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  const { data: session } = useSession()
   const prefsQuery = useQuery({ queryKey: ['prefs'], queryFn: getPrefs })
   const save = useMutation({
     mutationFn: setPrefs,
@@ -47,21 +50,42 @@ function PreferencesSection() {
       <h2 className="m-0 mb-3 flex items-center gap-2 text-base font-semibold text-[var(--ink)]">
         <Mail size={16} /> Preferences
       </h2>
-      <label className="island-shell flex cursor-pointer items-center gap-3 px-3 py-2.5">
-        <input
-          type="checkbox"
-          checked={enabled}
-          disabled={prefsQuery.isLoading || save.isPending}
-          onChange={(e) => save.mutate({ emailNotifications: e.target.checked })}
-          className="h-4 w-4 accent-[var(--accent)]"
-        />
-        <span className="min-w-0">
-          <span className="block text-sm font-medium text-[var(--ink)]">Email me when I'm mentioned</span>
-          <span className="block text-xs text-[var(--ink-soft)]">
-            Mention notifications by email. Invitations to documents are always delivered.
+      <div className="island-shell divide-y divide-[var(--line)] overflow-hidden">
+        <label className="flex cursor-pointer items-center gap-3 px-3 py-2.5">
+          <input
+            type="checkbox"
+            checked={enabled}
+            disabled={prefsQuery.isLoading || save.isPending}
+            onChange={(e) => save.mutate({ emailNotifications: e.target.checked })}
+            className="h-4 w-4 accent-[var(--accent)]"
+          />
+          <span className="min-w-0">
+            <span className="block text-sm font-medium text-[var(--ink)]">Email me when I'm mentioned</span>
+            <span className="block text-xs text-[var(--ink-soft)]">
+              Mention notifications by email. Invitations to documents are always delivered.
+            </span>
           </span>
-        </span>
-      </label>
+        </label>
+        <div className="flex items-center gap-3 px-3 py-2.5">
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-medium text-[var(--ink)]">Welcome guide</span>
+            <span className="block text-xs text-[var(--ink-soft)]">
+              The first-run walkthrough: install the CLI, teach your agent the skill, put it to work.
+            </span>
+          </span>
+          <Button
+            size="sm"
+            disabled={!session?.user}
+            onClick={() => {
+              if (!session?.user) return
+              resetNux(session.user.id)
+              void navigate({ to: '/' })
+            }}
+          >
+            Show again
+          </Button>
+        </div>
+      </div>
     </section>
   )
 }

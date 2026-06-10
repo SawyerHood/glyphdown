@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import FileBrowser from '../components/browser/FileBrowser.tsx'
 import Landing from '../components/landing/Landing.tsx'
+import WelcomeNux from '../components/WelcomeNux.tsx'
 
 /**
  * `/` is the file browser for signed-in users and the public landing page for
@@ -18,5 +19,11 @@ export const Route = createFileRoute('/')({
 function Home() {
   const { session } = Route.useRouteContext()
   const { folder } = Route.useSearch()
-  return session ? <FileBrowser folderId={folder ?? null} /> : <Landing />
+  if (!session) return <Landing />
+  return (
+    <>
+      <FileBrowser folderId={folder ?? null} />
+      <WelcomeNux userId={session.user.id} />
+    </>
+  )
 }
