@@ -2,6 +2,7 @@ import { Link, useNavigate, useRouterState } from '@tanstack/react-router'
 import { PanelLeft, PenLine, Settings } from 'lucide-react'
 import ThemeToggle from './ThemeToggle'
 import NotificationsBell from './NotificationsBell.tsx'
+import FeedbackButton from './FeedbackButton.tsx'
 import { resetAnalytics } from '../lib/analytics.ts'
 import { signOut, useSession } from '../lib/session.ts'
 import { useShellSignedIn } from '../lib/sessionGate.ts'
@@ -52,6 +53,7 @@ export default function Header() {
         </div>
 
         <div className="ml-auto flex items-center gap-1">
+          {user ? <FeedbackButton /> : null}
           {user ? <NotificationsBell /> : null}
           <ThemeToggle />
           <Link

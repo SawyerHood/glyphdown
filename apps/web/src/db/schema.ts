@@ -330,6 +330,30 @@ export const userPrefs = sqliteTable('user_prefs', {
   emailNotifications: integer('email_notifications').notNull().default(1),
 })
 
+/**
+ * In-app feature requests / bug reports (the Header feedback dialog). Read
+ * via the admin-gated GET /api/admin/feedback (surfaced on /admin and the
+ * hidden `glyphdown feedback` CLI command). Agents may file too — userId is
+ * always the responsible human (the agent's owner) for attribution.
+ */
+export const feedback = sqliteTable(
+  'feedback',
+  {
+    id: text('id').primaryKey(),
+    /** Principal that filed it (user id, or agent id acting for its owner). */
+    principalId: text('principal_id').notNull(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    type: text('type', { enum: ['feature', 'bug'] }).notNull(),
+    body: text('body').notNull(),
+    /** Pathname the dialog was opened from — free context for bug reports. */
+    page: text('page'),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => [index('feedback_created_idx').on(t.createdAt)],
+)
+
 export const notifications = sqliteTable(
   'notifications',
   {

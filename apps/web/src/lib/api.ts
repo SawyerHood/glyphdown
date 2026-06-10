@@ -117,6 +117,25 @@ export interface AdminStats {
 /** 404s (ApiError) for everyone but allowlisted admins — see api/admin.ts. */
 export const getAdminStats = () => request<AdminStats>('/api/admin/stats')
 
+export type FeedbackType = 'feature' | 'bug'
+
+export interface FeedbackItem {
+  id: string
+  type: FeedbackType
+  body: string
+  page: string | null
+  createdAt: number
+  user: { id: string; name: string; email: string | null }
+  filedByAgent: boolean
+}
+
+export const submitFeedback = (input: { type: FeedbackType; body: string; page?: string }) =>
+  request<{ id: string; ok: true }>('/api/feedback', { method: 'POST', body: input })
+
+/** Admin-only (404s otherwise), newest first. */
+export const getAdminFeedback = () =>
+  request<{ feedback: FeedbackItem[] }>('/api/admin/feedback').then((r) => r.feedback)
+
 export async function fetchMe(): Promise<Principal | null> {
   try {
     const { principal } = await request<{ principal: Principal }>('/api/me')

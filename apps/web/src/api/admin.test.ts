@@ -4,7 +4,8 @@ import { drizzle } from 'drizzle-orm/better-sqlite3'
 import type { Principal } from '@glyphdown/protocol'
 import type { Db } from '../db/client.ts'
 import { docs, user } from '../db/schema.ts'
-import { handleAdminStats, isAdminEmail } from './admin.ts'
+import { handleAdminFeedback, handleAdminStats, isAdminEmail } from './admin.ts'
+import { feedback } from '../db/schema.ts'
 
 // Same in-memory-sqlite trick as roles.test.ts / invites.test.ts.
 function setupDb(): Db {
@@ -14,6 +15,8 @@ function setupDb(): Db {
       email_verified INTEGER NOT NULL DEFAULT 0, image TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
     CREATE TABLE docs (id TEXT PRIMARY KEY, title TEXT NOT NULL, filename TEXT NOT NULL DEFAULT '',
       folder_id TEXT, owner_user_id TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deleted_at INTEGER);
+    CREATE TABLE feedback (id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, user_id TEXT NOT NULL,
+      type TEXT NOT NULL, body TEXT NOT NULL, page TEXT, created_at INTEGER NOT NULL);
   `)
   return drizzle(sqlite) as unknown as Db
 }
@@ -74,5 +77,31 @@ describe('handleAdminStats', () => {
   it('404s a principal with no user row', async () => {
     const db = setupDb()
     expect((await handleAdminStats(db, admin)).status).toBe(404)
+  })
+})
+
+describe('handleAdminFeedback', () => {
+  it('lists feedback for admins, 404s everyone else', async () => {
+    const db = setupDb()
+    await seed(db)
+    await db.insert(feedback).values({
+      id: 'f1',
+      principalId: 'user-1',
+      userId: 'user-1',
+      type: 'bug',
+      body: 'sync ate my doc',
+      page: '/d/abc',
+      createdAt: 5,
+    })
+
+    const res = await handleAdminFeedback(db, admin)
+    expect(res.status).toBe(200)
+    const { feedback: items } = (await res.json()) as { feedback: Array<{ body: string; user: { email: string } }> }
+    expect(items).toHaveLength(1)
+    expect(items[0]).toMatchObject({ body: 'sync ate my doc', user: { email: 'alice@example.com' } })
+
+    expect((await handleAdminFeedback(db, alice)).status).toBe(404)
+    expect((await handleAdminFeedback(db, adminsAgent)).status).toBe(404)
+    expect((await handleAdminFeedback(db, null)).status).toBe(401)
   })
 })

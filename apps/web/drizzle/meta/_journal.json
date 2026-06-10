@@ -43,6 +43,13 @@
       "when": 1780857325059,
       "tag": "0005_magenta_falcon",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1781060995467,
+      "tag": "0006_married_bromley",
+      "breakpoints": true
     }
   ]
 }
