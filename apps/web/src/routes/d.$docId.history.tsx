@@ -65,25 +65,27 @@ function HistoryPage() {
   }
 
   return (
-    <div className="flex h-screen flex-col bg-[var(--bg-base)]">
+    <div className="flex h-dvh flex-col bg-[var(--bg-base)]">
       <header className="flex h-12 shrink-0 items-center gap-3 border-b border-[var(--line)] bg-[var(--paper)] px-3">
         <Link
           to="/d/$docId"
           params={{ docId }}
           search={share ? { share } : {}}
-          className="flex items-center gap-1.5 text-sm font-medium text-[var(--ink-soft)] no-underline hover:text-[var(--ink)]"
+          className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-sm font-medium text-[var(--ink-soft)] no-underline hover:text-[var(--ink)]"
         >
           <ArrowLeft size={15} /> Back to editor
         </Link>
-        <span className="text-sm font-semibold text-[var(--ink)]">
+        <span className="min-w-0 truncate text-sm font-semibold text-[var(--ink)]">
           {docQuery.data?.title ?? 'Document'} — history
         </span>
         {error ? <span className="text-xs font-medium text-red-600">{error}</span> : null}
       </header>
 
-      <div className="flex min-h-0 flex-1">
+      {/* Below md the fixed 288px version list would leave the diff a sliver
+          of a column on phones — stack it above the diff instead. */}
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         {/* Version list */}
-        <aside className="w-72 shrink-0 overflow-y-auto border-r border-[var(--line)] bg-[var(--paper)]">
+        <aside className="max-h-48 w-full shrink-0 overflow-y-auto border-b border-[var(--line)] bg-[var(--paper)] md:max-h-none md:w-72 md:border-b-0 md:border-r">
           {versionsQuery.isLoading ? (
             <Spinner />
           ) : versions.length === 0 ? (

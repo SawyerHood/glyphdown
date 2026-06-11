@@ -786,7 +786,7 @@ export function DocEditorPage({ docId, share }: { docId: string; share: string |
   }, [docId, docSynced])
 
   return (
-    <div className="flex h-screen flex-col bg-[var(--bg-base)]">
+    <div className="flex h-dvh flex-col bg-[var(--bg-base)]">
       {/* Toolbar */}
       <header className="z-40 flex h-12 shrink-0 items-center gap-2 border-b border-[var(--line)] bg-[var(--paper)] px-3">
         <Link to="/" className="flex shrink-0 items-center gap-1.5 text-[var(--ink)] no-underline" title="All documents">
@@ -829,7 +829,10 @@ export function DocEditorPage({ docId, share }: { docId: string; share: string |
         {meta !== null && !canEdit ? <Badge tone="blue">{role}</Badge> : null}
         <ConnectionPill status={status} established={docSynced} />
 
-        <div className="ml-auto flex items-center gap-1.5">
+        {/* gap-1 below sm: the action cluster's min-content otherwise crowds
+            the title off narrow phones (the title is the row's only
+            shrinkable item). */}
+        <div className="ml-auto flex items-center gap-1 sm:gap-1.5">
           <PresenceStack peers={peers} />
 
           {meta === null ? null : canSuggest && canEdit ? (
@@ -893,8 +896,8 @@ export function DocEditorPage({ docId, share }: { docId: string; share: string |
           </Button>
 
           {isOwner ? (
-            <Button size="sm" variant="primary" onClick={() => setShareOpen(true)}>
-              <Share2 size={13} /> Share
+            <Button size="sm" variant="primary" onClick={() => setShareOpen(true)} title="Share">
+              <Share2 size={13} /> <span className="hidden sm:inline">Share</span>
             </Button>
           ) : null}
         </div>

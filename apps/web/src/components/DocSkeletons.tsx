@@ -62,7 +62,7 @@ export function DocumentSkeleton() {
  */
 export function EditorShellSkeleton() {
   return (
-    <div className="flex h-screen flex-col bg-[var(--bg-base)]">
+    <div className="flex h-dvh flex-col bg-[var(--bg-base)]">
       <header className="z-40 flex h-12 shrink-0 items-center gap-2 border-b border-[var(--line)] bg-[var(--paper)] px-3">
         <span className="flex h-6 w-6 items-center justify-center rounded-md bg-[var(--accent)] text-white">
           <PenLine size={13} />
