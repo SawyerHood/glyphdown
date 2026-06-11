@@ -188,7 +188,11 @@ export default function ShareDialog({
           <UserPlus size={11} /> Invite people
         </h3>
         <div className="flex items-center gap-2">
+          {/* min-w-0 lets the email input give way (flex inputs keep a
+              ~170px automatic minimum otherwise) so the role select and the
+              Invite button stay on-screen inside narrow dialogs. */}
           <Input
+            className="min-w-0"
             value={inviteEmail}
             onChange={(v) => {
               setInviteEmail(v)
@@ -199,8 +203,8 @@ export default function ShareDialog({
               if (e.key === 'Enter' && inviteEmail.trim() !== '') invite.mutate()
             }}
           />
-          <Select value={inviteRole} onChange={setInviteRole} options={GRANTABLE} />
-          <Button variant="primary" size="sm" disabled={inviteEmail.trim() === '' || invite.isPending} onClick={() => invite.mutate()}>
+          <Select className="shrink-0" value={inviteRole} onChange={setInviteRole} options={GRANTABLE} />
+          <Button className="shrink-0" variant="primary" size="sm" disabled={inviteEmail.trim() === '' || invite.isPending} onClick={() => invite.mutate()}>
             Invite
           </Button>
         </div>

@@ -74,7 +74,11 @@ export default function NotificationsBell() {
       </button>
 
       {open ? (
-        <div className="absolute right-0 top-full z-50 mt-1 w-80 rounded-lg border border-[var(--line)] bg-[var(--paper)] shadow-lg">
+        // Below sm the fixed 320px panel would stick out past the left
+        // viewport edge (unscrollable). The header's backdrop-blur makes it
+        // the containing block for `fixed`, so inset-x-4/top-14 pin the
+        // panel just under the sticky header, inside the viewport.
+        <div className="fixed inset-x-4 top-14 z-50 rounded-lg border border-[var(--line)] bg-[var(--paper)] shadow-lg sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-1 sm:w-80">
           <div className="flex items-center justify-between border-b border-[var(--line)] px-3 py-2">
             <span className="text-xs font-semibold text-[var(--ink)]">Notifications</span>
             {unread.length > 0 ? (

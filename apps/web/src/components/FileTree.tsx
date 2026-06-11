@@ -633,7 +633,7 @@ function DocRow({ doc, depth, ctx }: { doc: DocMeta; depth: number; ctx: TreeCtx
         <span className="truncate">{doc.title}</span>
       </Link>
       {isOwner ? (
-        <span className="flex shrink-0 items-center opacity-0 transition group-focus-within:opacity-100 group-hover:opacity-100">
+        <span className="flex shrink-0 items-center opacity-0 transition group-focus-within:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100">
           <RowMenu
             items={[
               { label: 'Rename', icon: <Pencil size={13} />, onSelect: () => ctx.setRenaming({ kind: 'doc', doc }) },

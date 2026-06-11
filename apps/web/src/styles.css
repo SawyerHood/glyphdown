@@ -105,6 +105,15 @@ body,
   min-height: 100%;
 }
 
+/* Mobile guard: one non-shrinkable row must never widen the document and let
+   phones pan the whole page sideways. `clip` rather than `hidden` — clip
+   creates no scroll container, so the sticky header and the
+   animation-timeline: view() reveals keep working. */
+html,
+body {
+  overflow-x: clip;
+}
+
 body {
   margin: 0;
   color: var(--ink);
