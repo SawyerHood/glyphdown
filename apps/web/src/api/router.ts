@@ -678,6 +678,22 @@ async function handleFolders(db: Db, request: Request, url: URL): Promise<Respon
     return folderListing(db, listingMatch[1]!, principal, shareTokenFrom(url, request))
   }
 
+  // Folder share-link landing pages need their assets before the visitor has
+  // an authenticated session. Only the read surface rides share tokens here;
+  // mutations continue through the authenticated route below.
+  const sharedAssetMatch = url.pathname.match(/^\/api\/folders\/([^/]+)(\/assets(?:\/.*)?)$/)
+  if (sharedAssetMatch && request.method === 'GET') {
+    return folderAssetRead(
+      db,
+      request,
+      url,
+      sharedAssetMatch[1]!,
+      sharedAssetMatch[2]!,
+      principal,
+      shareTokenFrom(url, request),
+    )
+  }
+
   if (!principal) return json({ error: 'unauthenticated' }, 401)
   const userId = effectiveUserId(principal)
   if (userId === null) return json({ error: 'forbidden' }, 403)
@@ -772,6 +788,32 @@ async function listFolders(db: Db, userId: string, ids: string[]): Promise<Respo
     }
   }
   return json({ folders: [...byId.values()] })
+}
+
+async function folderAssetRead(
+  db: Db,
+  request: Request,
+  url: URL,
+  folderId: string,
+  subPath: string,
+  principal: Principal | null,
+  shareToken: string | null,
+): Promise<Response> {
+  const unauthorized = () =>
+    !principal && !shareToken ? json({ error: 'unauthenticated' }, 401) : json({ error: 'not-found' }, 404)
+
+  const folder = (await db.select().from(folders).where(eq(folders.id, folderId)).limit(1))[0]
+  if (!folder) return unauthorized()
+  const role = maxRole(
+    await resolveFolderRole(db, folder, principal),
+    await folderShareLinkRole(db, folder.id, principal, shareToken),
+  )
+  if (role === null) return unauthorized()
+
+  return handleFolderAssets(db, asAppEnv(env).ASSETS, request, url, folder.id, subPath, {
+    principal: principal ?? { id: 'anonymous', type: 'user', name: 'Anonymous' },
+    role,
+  })
 }
 
 /**

@@ -363,6 +363,61 @@ describe('GET /api/folders/:id/assets with an inherited grant', () => {
     const mallory = principalFor('mallory')
     expect((await api('/api/folders/sub/assets', { headers: mallory }))!.status).toBe(404)
   })
+
+  it('lets anonymous folder-share viewers list and stream html assets', async () => {
+    principalFor('alice')
+    seedVault('v1', 'alice')
+    seedFolder('sub', 'alice', 'v1')
+    seedShareLink('tok-v1', 'folder', 'v1')
+    raw.prepare(`INSERT INTO assets (id, folder_id, doc_id, filename, r2_key, content_type, size, etag, created_by, created_at)
+                 VALUES ('a-html', 'sub', NULL, 'page.html', 'folder/sub/page.html', 'text/html', 15, 'e-html', 'alice', 1)`).run()
+    h.objects.set('folder/sub/page.html', { bytes: new TextEncoder().encode('<!doctype html>'), contentType: 'text/html' })
+
+    const list = await api('/api/folders/sub/assets', { headers: { 'x-glyphdown-share': 'tok-v1' } })
+    expect(list!.status).toBe(200)
+    expect(await jsonOf<{ assets: Array<{ filename: string; contentType: string }> }>(list)).toMatchObject({
+      assets: [{ filename: 'page.html', contentType: 'text/html' }],
+    })
+
+    const stream = await api('/api/folders/sub/assets/page.html?share=tok-v1')
+    expect(stream!.status).toBe(200)
+    expect(stream!.headers.get('content-type')).toBe('text/html')
+    expect(stream!.headers.get('content-security-policy')).toBe('sandbox allow-scripts')
+    expect(stream!.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(new TextDecoder().decode(await stream!.arrayBuffer())).toBe('<!doctype html>')
+  })
+
+  it('rejects missing, invalid, and revoked anonymous share tokens for folder assets', async () => {
+    principalFor('alice')
+    seedVault('v1', 'alice')
+    seedFolder('sub', 'alice', 'v1')
+    seedShareLink('tok-dead', 'folder', 'v1', 'viewer', 999)
+    raw.prepare(`INSERT INTO assets (id, folder_id, doc_id, filename, r2_key, content_type, size, etag, created_by, created_at)
+                 VALUES ('a-html', 'sub', NULL, 'page.html', 'folder/sub/page.html', 'text/html', 15, 'e-html', 'alice', 1)`).run()
+    h.objects.set('folder/sub/page.html', { bytes: new TextEncoder().encode('<!doctype html>'), contentType: 'text/html' })
+
+    expect((await api('/api/folders/sub/assets/page.html'))!.status).toBe(401)
+    expect((await api('/api/folders/sub/assets/page.html?share=missing'))!.status).toBe(404)
+    expect((await api('/api/folders/sub/assets/page.html?share=tok-dead'))!.status).toBe(404)
+  })
+
+  it('does not let anonymous share-token callers mutate folder assets', async () => {
+    principalFor('alice')
+    seedVault('v1', 'alice')
+    seedFolder('sub', 'alice', 'v1')
+    seedShareLink('tok-v1', 'folder', 'v1')
+    raw.prepare(`INSERT INTO assets (id, folder_id, doc_id, filename, r2_key, content_type, size, etag, created_by, created_at)
+                 VALUES ('a-html', 'sub', NULL, 'page.html', 'folder/sub/page.html', 'text/html', 15, 'e-html', 'alice', 1)`).run()
+    h.objects.set('folder/sub/page.html', { bytes: new TextEncoder().encode('<!doctype html>'), contentType: 'text/html' })
+
+    const post = await api('/api/folders/sub/assets?filename=new.html&share=tok-v1', {
+      method: 'POST',
+      headers: { 'content-type': 'text/html' },
+      body: '<!doctype html>',
+    })
+    expect(post!.status).toBe(401)
+    expect((await api('/api/folders/sub/assets/page.html?share=tok-v1', { method: 'DELETE' }))!.status).toBe(401)
+  })
 })
 
 describe('POST /api/folders/:id/assets', () => {
