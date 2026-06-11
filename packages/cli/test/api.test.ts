@@ -99,6 +99,62 @@ describe('createApi', () => {
   })
 })
 
+describe('share links', () => {
+  it('lists doc share links: GET /share-links, unwrapped', async () => {
+    const links = [{ token: 'tok1', role: 'viewer', createdAt: 5 }]
+    const fetchMock = vi.fn(async () => jsonResponse({ shareLinks: links })) as unknown as typeof fetch
+    const api = apiWith(fetchMock)
+    await expect(api.listDocShareLinks('doc1')).resolves.toEqual(links)
+    const [url, init] = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls[0]! as [string, RequestInit]
+    expect(url).toBe(`${SERVER}/api/docs/doc1/share-links`)
+    expect(init.method).toBe('GET')
+  })
+
+  it('creates a doc share link: POST with the role in the body', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ token: 'tok2', role: 'editor', createdAt: 6 })) as unknown as typeof fetch
+    const api = apiWith(fetchMock)
+    const link = await api.createDocShareLink('doc1', 'editor')
+    expect(link).toEqual({ token: 'tok2', role: 'editor', createdAt: 6 })
+    const [url, init] = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls[0]! as [string, RequestInit]
+    expect(url).toBe(`${SERVER}/api/docs/doc1/share-links`)
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body as string)).toEqual({ role: 'editor' })
+  })
+
+  it('revokes a doc share link: DELETE /share-links/:token (token URL-encoded)', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ ok: true })) as unknown as typeof fetch
+    const api = apiWith(fetchMock)
+    await api.revokeDocShareLink('doc1', 'tok/3')
+    const [url, init] = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls[0]! as [string, RequestInit]
+    expect(url).toBe(`${SERVER}/api/docs/doc1/share-links/tok%2F3`)
+    expect(init.method).toBe('DELETE')
+  })
+
+  it('folder share links ride /api/folders/:id/share-links', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ shareLinks: [] }))
+      .mockResolvedValueOnce(jsonResponse({ token: 'ftok', role: 'viewer', createdAt: 7 }))
+      .mockResolvedValueOnce(jsonResponse({ ok: true })) as unknown as typeof fetch
+    const api = apiWith(fetchMock)
+    await expect(api.listFolderShareLinks('f1')).resolves.toEqual([])
+    await expect(api.createFolderShareLink('f1', 'viewer')).resolves.toEqual({ token: 'ftok', role: 'viewer', createdAt: 7 })
+    await api.revokeFolderShareLink('f1', 'ftok')
+    const calls = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls as Array<[string, RequestInit]>
+    expect(calls.map(([url, init]) => `${init.method} ${url}`)).toEqual([
+      `GET ${SERVER}/api/folders/f1/share-links`,
+      `POST ${SERVER}/api/folders/f1/share-links`,
+      `DELETE ${SERVER}/api/folders/f1/share-links/ftok`,
+    ])
+  })
+
+  it('maps a 403 (non-owner) to the forbidden CliError', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ error: 'forbidden' }, 403)) as unknown as typeof fetch
+    const api = apiWith(fetchMock)
+    await expect(api.createDocShareLink('doc1', 'viewer')).rejects.toThrowError(/forbidden/)
+  })
+})
+
 describe('pushWithBase', () => {
   const ok: PushResponse = { ok: true, mode: 'edit', applied: 1, failedHunks: [], versionId: 'v2' }
 

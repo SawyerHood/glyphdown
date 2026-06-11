@@ -8,6 +8,8 @@ import type {
   Principal,
   PushRequest,
   PushResponse,
+  ShareLink,
+  ShareLinkRole,
   SuggestionRecord,
   UploadAssetResponse,
   VaultMeta,
@@ -88,6 +90,16 @@ export interface Api {
   resolveComment(docId: string, commentId: string, resolved?: boolean): Promise<void>
   listSuggestions(docId: string): Promise<SuggestionRecord[]>
   createVersion(docId: string, name: string): Promise<VersionMeta>
+  /**
+   * Share links (anyone-with-link grants) — owner-only on the target; the
+   * server 403s otherwise. A folder link covers the folder's entire subtree.
+   */
+  listDocShareLinks(docId: string): Promise<ShareLink[]>
+  createDocShareLink(docId: string, role: ShareLinkRole): Promise<ShareLink>
+  revokeDocShareLink(docId: string, token: string): Promise<void>
+  listFolderShareLinks(folderId: string): Promise<ShareLink[]>
+  createFolderShareLink(folderId: string, role: ShareLinkRole): Promise<ShareLink>
+  revokeFolderShareLink(folderId: string, token: string): Promise<void>
   /** Asset surface: doc routes resolve the namespace (folder or doc) server-side. */
   listDocAssets(docId: string): Promise<AssetMeta[]>
   listFolderAssets(folderId: string): Promise<AssetMeta[]>
@@ -275,6 +287,44 @@ export function createApi(opts: ApiOptions): Api {
 
     createVersion(docId, name) {
       return requestJson<VersionMeta>('POST', `/api/docs/${encodeURIComponent(docId)}/versions`, { name })
+    },
+
+    async listDocShareLinks(docId) {
+      const { shareLinks } = await requestJson<{ shareLinks: ShareLink[] }>(
+        'GET',
+        `/api/docs/${encodeURIComponent(docId)}/share-links`,
+      )
+      return shareLinks
+    },
+
+    createDocShareLink(docId, role) {
+      return requestJson<ShareLink>('POST', `/api/docs/${encodeURIComponent(docId)}/share-links`, { role })
+    },
+
+    async revokeDocShareLink(docId, token) {
+      await requestJson<unknown>(
+        'DELETE',
+        `/api/docs/${encodeURIComponent(docId)}/share-links/${encodeURIComponent(token)}`,
+      )
+    },
+
+    async listFolderShareLinks(folderId) {
+      const { shareLinks } = await requestJson<{ shareLinks: ShareLink[] }>(
+        'GET',
+        `/api/folders/${encodeURIComponent(folderId)}/share-links`,
+      )
+      return shareLinks
+    },
+
+    createFolderShareLink(folderId, role) {
+      return requestJson<ShareLink>('POST', `/api/folders/${encodeURIComponent(folderId)}/share-links`, { role })
+    },
+
+    async revokeFolderShareLink(folderId, token) {
+      await requestJson<unknown>(
+        'DELETE',
+        `/api/folders/${encodeURIComponent(folderId)}/share-links/${encodeURIComponent(token)}`,
+      )
     },
 
     async listDocAssets(docId) {
