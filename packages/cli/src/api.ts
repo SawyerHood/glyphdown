@@ -36,7 +36,7 @@ export interface ContentResult {
   baseHash: string | null
 }
 
-/** Raw asset bytes — binary, NEVER EOL-normalized (images are not text). */
+/** Raw asset bytes — binary, NEVER EOL-normalized. */
 export interface AssetDownload {
   data: Uint8Array
   /** Unquoted etag from the response header, when sent. */
@@ -107,6 +107,13 @@ export interface Api {
   downloadFolderAsset(folderId: string, filename: string): Promise<AssetDownload>
   uploadDocAsset(
     docId: string,
+    filename: string,
+    data: Uint8Array,
+    contentType: string,
+    overwrite?: boolean,
+  ): Promise<UploadAssetResponse>
+  uploadFolderAsset(
+    folderId: string,
     filename: string,
     data: Uint8Array,
     contentType: string,
@@ -351,23 +358,37 @@ export function createApi(opts: ApiOptions): Api {
       return downloadBinary(`/api/folders/${encodeURIComponent(folderId)}/assets/${encodeURIComponent(filename)}`)
     },
 
-    async uploadDocAsset(docId, filename, data, contentType, overwrite = false) {
-      const params = new URLSearchParams({ filename })
-      if (overwrite) params.set('overwrite', 'true')
-      const headers: Record<string, string> = { 'content-type': contentType }
-      if (credential) headers.authorization = `Bearer ${credential}`
-      const res = await fetchFn(
-        `${base}/api/docs/${encodeURIComponent(docId)}/assets?${params.toString()}`,
-        // Binary body straight through — no JSON wrapping, no EOL touching.
-        { method: 'POST', headers, body: data as unknown as RequestInit['body'] },
-      )
-      const text = await res.text()
-      if (!res.ok) throw mapError(res.status, text, res.headers.get('retry-after'))
-      return JSON.parse(text) as UploadAssetResponse
+    uploadDocAsset(docId, filename, data, contentType, overwrite = false) {
+      return uploadAsset(`/api/docs/${encodeURIComponent(docId)}/assets`, filename, data, contentType, overwrite)
+    },
+
+    uploadFolderAsset(folderId, filename, data, contentType, overwrite = false) {
+      return uploadAsset(`/api/folders/${encodeURIComponent(folderId)}/assets`, filename, data, contentType, overwrite)
     },
   }
 
-  /** GET binary content via ArrayBuffer — images must never be EOL-normalized. */
+  async function uploadAsset(
+    path: string,
+    filename: string,
+    data: Uint8Array,
+    contentType: string,
+    overwrite: boolean,
+  ): Promise<UploadAssetResponse> {
+    const params = new URLSearchParams({ filename })
+    if (overwrite) params.set('overwrite', 'true')
+    const headers: Record<string, string> = { 'content-type': contentType }
+    if (credential) headers.authorization = `Bearer ${credential}`
+    const res = await fetchFn(
+      `${base}${path}?${params.toString()}`,
+      // Binary body straight through — no JSON wrapping, no EOL touching.
+      { method: 'POST', headers, body: data as unknown as RequestInit['body'] },
+    )
+    const text = await res.text()
+    if (!res.ok) throw mapError(res.status, text, res.headers.get('retry-after'))
+    return JSON.parse(text) as UploadAssetResponse
+  }
+
+  /** GET binary content via ArrayBuffer — assets must never be EOL-normalized. */
   async function downloadBinary(path: string): Promise<AssetDownload> {
     const res = await send('GET', path)
     if (!res.ok) throw mapError(res.status, await res.text(), res.headers.get('retry-after'))

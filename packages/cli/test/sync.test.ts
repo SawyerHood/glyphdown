@@ -108,10 +108,49 @@ describe('glyphdown sync + push --all with assets', () => {
 
     await h.run(['sync', target])
     expect(state.assets.get('local.png')!.data).toEqual(localBytes)
-    expect(state.assetUploads.at(-1)).toMatchObject({ docId: 'd1', filename: 'local.png', overwrite: false })
+    expect(state.assetUploads.at(-1)).toMatchObject({ scope: 'folder', id: 'f1', filename: 'local.png', overwrite: false })
     expect(new Uint8Array(readFileSync(join(target, 'added-later.png')))).toEqual(new Uint8Array([4, 4]))
     expect(h.lines.some((l) => l.includes('asset local.png') && l.includes('pushed'))).toBe(true)
     expect(h.lines.some((l) => l.includes('asset added-later.png') && l.includes('pulled'))).toBe(true)
+  })
+
+  it('falls back to doc-scoped upload for folder images when an old server 405s folder uploads', async () => {
+    const state = server({ folders: [folder('f1', 'Specs')], folderAssetUploadStatus: 405 })
+    state.docs.set('d1', serverDoc('d1', 'Doc', 'text\n', 'f1'))
+
+    const dir = tmp()
+    const h = harness(dir, state)
+    await h.run(['pull', '--folder', 'f1'])
+    const target = join(dir, 'specs')
+
+    const localBytes = new Uint8Array([6, 6, 6])
+    writeFileSync(join(target, 'local.png'), localBytes)
+
+    await h.run(['sync', target])
+    expect(state.assets.get('local.png')!.data).toEqual(localBytes)
+    expect(state.assetUploads).toEqual([
+      { scope: 'doc', id: 'd1', filename: 'local.png', overwrite: false },
+    ])
+    expect(h.lines.some((l) => l.includes('asset local.png') && l.includes('pushed'))).toBe(true)
+  })
+
+  it('fails HTML folder uploads clearly when an old server lacks folder asset POST', async () => {
+    const state = server({ folders: [folder('f1', 'Specs')], folderAssetUploadStatus: 405 })
+    state.docs.set('d1', serverDoc('d1', 'Doc', 'text\n', 'f1'))
+
+    const dir = tmp()
+    const h = harness(dir, state)
+    await h.run(['pull', '--folder', 'f1'])
+    const target = join(dir, 'specs')
+    writeFileSync(join(target, 'page.html'), '<!doctype html><p>hi</p>')
+
+    await expect(h.run(['sync', target])).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(CliError)
+      expect((error as CliError).exitCode).toBe(1)
+      return true
+    })
+    expect(state.assetUploads).toEqual([])
+    expect(h.errors.join('\n')).toContain('server does not support folder HTML asset uploads')
   })
 
   it('push --all uploads changed images with overwrite and never downloads', async () => {
@@ -131,7 +170,7 @@ describe('glyphdown sync + push --all with assets', () => {
 
     await h.run(['push', '--all', target])
     expect(state.assets.get('pic.png')!.data).toEqual(edited)
-    expect(state.assetUploads.at(-1)).toMatchObject({ filename: 'pic.png', overwrite: true })
+    expect(state.assetUploads.at(-1)).toMatchObject({ scope: 'folder', id: 'f1', filename: 'pic.png', overwrite: true })
     // push mode never downloads — the deleted local copy stays deleted.
     expect(existsSync(join(target, 'remote-only.png'))).toBe(false)
     expect(h.lines.some((l) => l.includes('asset pic.png') && l.includes('pushed'))).toBe(true)

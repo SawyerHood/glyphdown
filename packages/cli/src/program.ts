@@ -79,14 +79,13 @@ export function createProgram(deps: ProgramDeps = {}): Command {
 
   // -- assets helpers -----------------------------------------------------------
   // The asset scope for a workspace dir: its linked folder (folder.json)
-  // when present — uploads ride the first tracked doc, every folder doc shares
-  // the namespace — else the first tracked doc's own namespace (the server
+  // when present — else the first tracked doc's own namespace (the server
   // resolves folder-vs-doc scoping per doc).
   const assetOpsFor = (dir: string): AssetOps | null => {
     const folderConfig = readFolderConfig(dir)
     const metas = listMetas(dir).sort((a, b) => a.file.localeCompare(b.file))
     if (folderConfig) {
-      return folderAssetOps(apiFor(folderConfig.serverUrl), folderConfig.folderId, metas[0]?.docId ?? null)
+      return folderAssetOps(apiFor(folderConfig.serverUrl), folderConfig.folderId, folderConfig.serverUrl, metas[0]?.docId ?? null)
     }
     const meta = metas[0]
     if (meta) return docAssetOps(apiFor(meta.serverUrl), meta.docId)
@@ -362,7 +361,7 @@ export function createProgram(deps: ProgramDeps = {}): Command {
         // pull (the docs are already on disk).
         const assetResults = await pullAssets({
           dir: result.dir,
-          ops: folderAssetOps(api, result.folder.id, null),
+          ops: folderAssetOps(api, result.folder.id),
           err: errOut,
         })
         printAssetResults(assetResults.filter((r) => r.action !== 'up-to-date'))
@@ -417,7 +416,7 @@ export function createProgram(deps: ProgramDeps = {}): Command {
         if (opts.all) {
           const dir = resolve(cwd(), pathArg ?? '.')
           // Docs first; the asset pass runs even when some docs failed so a
-          // bad doc cannot strand image uploads.
+          // bad doc cannot strand asset uploads.
           let docError: unknown = null
           try {
             await pushAll({
