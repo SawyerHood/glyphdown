@@ -65,6 +65,7 @@ function fakeApi(overrides: Partial<Api> = {}): Api {
     downloadDocAsset: vi.fn(async () => ({ data: new Uint8Array(), etag: null, contentType: null })),
     downloadFolderAsset: vi.fn(async () => ({ data: new Uint8Array(), etag: null, contentType: null })),
     uploadDocAsset: vi.fn(),
+    uploadFolderAsset: vi.fn(),
     ...overrides,
   }
 }

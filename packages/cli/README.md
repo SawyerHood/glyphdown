@@ -116,7 +116,8 @@ nor `--vault`** creates the doc in your server-side **default vault** (the
 ## Mirror workflow (clone + sync)
 
 Mirror **everything you can access** — every vault, the full nested folder
-tree, every doc, every image asset — and keep it converged:
+tree, every doc, every syncable asset (images and HTML files) — and keep it
+converged:
 
 ```sh
 glyphdown clone [dir]  # default dir: ./glyphdown
@@ -147,7 +148,7 @@ workspace rooted at the vault: the root gets `.glyphdown/folder.json`, not
 | tracked doc edited locally / remotely / both | pushed / pulled / merged — same per-doc semantics as the table below |
 | **new local `.md` file** | doc created on the server **named after the file** (slugified when messy — `My Notes.md → my-notes.md`, reported; the local file renames to match; the `# heading` is just content), in the folder matching its directory, content pushed (`created`) |
 | tracked doc whose **server filename differs** from the local name (web-UI rename, or the one-time filename migration) | local file **renamed to the canonical name** (`renamed locally: old → new`) and the manifest updated — one-time convergence, after which names round-trip verbatim |
-| **new local directory** (containing `.md`/image files) | folder created server-side with the parentId matching its path, then its contents processed (`folder created`); empty dirs are skipped |
+| **new local directory** (containing `.md`/asset files) | folder created server-side with the parentId matching its path, then its contents processed (`folder created`); empty dirs are skipped |
 | **new server doc** | materialized into the matching local dir, nested paths included (`new`) |
 | **new server folder** | materialized as a nested local dir (`new folder (server)`) |
 | server-side folder **rename/move** | noted (`folder renamed (server)`); the local dir is **not** renamed or moved — mapping is by folder id in `.glyphdown/folder.json`, so sync keeps resolving it (v1) |
@@ -172,8 +173,11 @@ glyphdown mv launch-plan.md launch-plan-v2     # .md optional; names slugify
 A name already used in the doc's folder (or your root, for folderless docs)
 is rejected with `filename taken` — nothing moves.
 
-Dotfiles (including the bookkeeping dir) and non-markdown/non-image files are ignored (noted once
-per sync on stderr).
+Dotfiles (including the bookkeeping dir) and non-markdown/non-asset files are
+ignored (noted once per sync on stderr). Syncable asset files are images
+(`png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`, `avif`) and HTML (`html`, `htm`),
+up to 10 MB. When sync uploads an HTML file in a folder workspace, it prints
+the viewer URL as `<server>/f/<folderId>/file/<filename>`.
 
 ### Workspace layout
 
