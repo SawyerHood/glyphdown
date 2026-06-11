@@ -194,12 +194,29 @@ export function docAssetOps(api: Api, docId: string): AssetOps {
   }
 }
 
-export function folderAssetOps(api: Api, folderId: string, serverUrl?: string): AssetOps {
+export function folderAssetOps(
+  api: Api,
+  folderId: string,
+  serverUrl?: string,
+  legacyUploadDocId?: string | null,
+): AssetOps {
   return {
     list: () => api.listFolderAssets(folderId),
     download: (filename) => api.downloadFolderAsset(folderId, filename),
-    upload: async (filename, data, contentType, overwrite) =>
-      (await api.uploadFolderAsset(folderId, filename, data, contentType, overwrite)).asset,
+    upload: async (filename, data, contentType, overwrite) => {
+      try {
+        return (await api.uploadFolderAsset(folderId, filename, data, contentType, overwrite)).asset
+      } catch (error) {
+        if (!isLegacyFolderUploadMiss(error)) throw error
+        if (assetKindForContentType(contentType) !== 'image') {
+          throw new Error('server does not support folder HTML asset uploads — upgrade the server to sync .html/.htm files')
+        }
+        if (legacyUploadDocId === undefined || legacyUploadDocId === null) {
+          throw new Error('no doc in this folder to upload through — pull a doc first')
+        }
+        return (await api.uploadDocAsset(legacyUploadDocId, filename, data, contentType, overwrite)).asset
+      }
+    },
     ...(serverUrl !== undefined ? { viewerUrl: (filename) => fileViewerUrl(serverUrl, folderId, filename) } : {}),
   }
 }
@@ -403,4 +420,9 @@ function errorMessage(error: unknown): string {
 
 function fileViewerUrl(serverUrl: string, folderId: string, filename: string): string {
   return `${serverUrl.replace(/\/+$/, '')}/f/${folderId}/file/${encodeURIComponent(filename)}`
+}
+
+function isLegacyFolderUploadMiss(error: unknown): boolean {
+  const status = typeof error === 'object' && error !== null ? (error as { status?: unknown }).status : undefined
+  return status === 404 || status === 405
 }

@@ -114,6 +114,45 @@ describe('glyphdown sync + push --all with assets', () => {
     expect(h.lines.some((l) => l.includes('asset added-later.png') && l.includes('pulled'))).toBe(true)
   })
 
+  it('falls back to doc-scoped upload for folder images when an old server 405s folder uploads', async () => {
+    const state = server({ folders: [folder('f1', 'Specs')], folderAssetUploadStatus: 405 })
+    state.docs.set('d1', serverDoc('d1', 'Doc', 'text\n', 'f1'))
+
+    const dir = tmp()
+    const h = harness(dir, state)
+    await h.run(['pull', '--folder', 'f1'])
+    const target = join(dir, 'specs')
+
+    const localBytes = new Uint8Array([6, 6, 6])
+    writeFileSync(join(target, 'local.png'), localBytes)
+
+    await h.run(['sync', target])
+    expect(state.assets.get('local.png')!.data).toEqual(localBytes)
+    expect(state.assetUploads).toEqual([
+      { scope: 'doc', id: 'd1', filename: 'local.png', overwrite: false },
+    ])
+    expect(h.lines.some((l) => l.includes('asset local.png') && l.includes('pushed'))).toBe(true)
+  })
+
+  it('fails HTML folder uploads clearly when an old server lacks folder asset POST', async () => {
+    const state = server({ folders: [folder('f1', 'Specs')], folderAssetUploadStatus: 405 })
+    state.docs.set('d1', serverDoc('d1', 'Doc', 'text\n', 'f1'))
+
+    const dir = tmp()
+    const h = harness(dir, state)
+    await h.run(['pull', '--folder', 'f1'])
+    const target = join(dir, 'specs')
+    writeFileSync(join(target, 'page.html'), '<!doctype html><p>hi</p>')
+
+    await expect(h.run(['sync', target])).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(CliError)
+      expect((error as CliError).exitCode).toBe(1)
+      return true
+    })
+    expect(state.assetUploads).toEqual([])
+    expect(h.errors.join('\n')).toContain('server does not support folder HTML asset uploads')
+  })
+
   it('push --all uploads changed images with overwrite and never downloads', async () => {
     const state = server({ folders: [folder('f1', 'Specs')] })
     state.docs.set('d1', serverDoc('d1', 'Doc', 'text\n', 'f1'))

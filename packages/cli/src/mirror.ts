@@ -644,7 +644,7 @@ export async function syncWorkspace(opts: MirrorSyncOptions): Promise<MirrorSync
     const firstDocId = freshMetas[0]?.docId ?? null
     let ops: AssetOps | null = null
     if (typeof node.folderId === 'string' && node.skipCreation !== true) {
-      ops = folderAssetOps(api, node.folderId, serverUrl)
+      ops = folderAssetOps(api, node.folderId, serverUrl, firstDocId)
     } else if (node.rel === '' && node.folderId === null && firstDocId !== null) {
       // Mirror root: folderless docs carry their own namespace — ride the first.
       ops = docAssetOps(api, firstDocId)
