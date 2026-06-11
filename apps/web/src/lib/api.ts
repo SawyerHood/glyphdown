@@ -489,17 +489,49 @@ export const listAssets = (docId: string, share?: string) =>
 export const deleteAsset = (docId: string, filename: string, share?: string) =>
   request<{ ok: true }>(doc(docId, `/assets/${encodeURIComponent(filename)}`), { method: 'DELETE', share })
 
-// Folder-scoped asset surface (the file-tree sidebar): signed-in only — no
-// share-token plumbing, same-origin cookies authenticate <img>/<a> fetches.
+// Folder-scoped asset surface. Signed-in same-origin requests ride cookies;
+// folder share-link viewers pass the token as ?share= because iframes/img/a
+// requests cannot carry custom headers.
 
 const folderAsset = (folderId: string, filename: string) =>
   `/api/folders/${encodeURIComponent(folderId)}/assets/${encodeURIComponent(filename)}`
 
 /** URL an <img> / download anchor can fetch a folder asset from. */
-export const folderAssetUrl = folderAsset
+export function folderAssetUrl(folderId: string, filename: string, share?: string): string {
+  const base = folderAsset(folderId, filename)
+  return share ? `${base}?share=${encodeURIComponent(share)}` : base
+}
 
-export const listFolderAssets = (folderId: string) =>
-  request<{ assets: AssetMeta[] }>(`/api/folders/${encodeURIComponent(folderId)}/assets`).then((r) => r.assets)
+export const listFolderAssets = (folderId: string, share?: string) =>
+  request<{ assets: AssetMeta[] }>(`/api/folders/${encodeURIComponent(folderId)}/assets`, { share }).then((r) => r.assets)
+
+/** Raw-binary folder asset upload; editor+ only, image/* or text/html ≤ 10 MB. */
+export async function uploadFolderAsset(
+  folderId: string,
+  filename: string,
+  blob: Blob,
+  opts: { overwrite?: boolean } = {},
+): Promise<UploadAssetResponse> {
+  const params = new URLSearchParams({ filename })
+  if (opts.overwrite) params.set('overwrite', 'true')
+  const res = await fetch(`/api/folders/${encodeURIComponent(folderId)}/assets?${params}`, {
+    method: 'POST',
+    headers: { 'content-type': blob.type || 'application/octet-stream' },
+    credentials: 'same-origin',
+    body: blob,
+  })
+  if (!res.ok) {
+    let code = `http-${res.status}`
+    try {
+      const data = (await res.json()) as { error?: unknown }
+      if (typeof data.error === 'string') code = data.error
+    } catch {
+      // non-JSON error body
+    }
+    throw new ApiError(res.status, code)
+  }
+  return (await res.json()) as UploadAssetResponse
+}
 
 export const deleteFolderAsset = (folderId: string, filename: string) =>
   request<{ ok: true }>(folderAsset(folderId, filename), { method: 'DELETE' })

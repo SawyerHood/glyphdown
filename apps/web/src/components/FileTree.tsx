@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronRight,
   Download,
+  FileCode2,
   FilePlus,
   FilePlus2,
   FileText,
@@ -18,7 +19,7 @@ import {
   Plus,
   Trash2,
 } from 'lucide-react'
-import { MAX_FOLDER_DEPTH, roleAtLeast, type AssetMeta, type DocMeta } from '@glyphdown/protocol'
+import { assetKindForContentType, MAX_FOLDER_DEPTH, roleAtLeast, type AssetMeta, type DocMeta } from '@glyphdown/protocol'
 import {
   ApiError,
   deleteFolderAsset,
@@ -378,7 +379,7 @@ function FolderItem({ node, depth, ctx }: { node: TreeFolderNode; depth: number;
     enabled: expanded,
     staleTime: 30_000,
   })
-  const folderAssets = sortAssets(assetsQuery.data ?? [])
+  const folderAssets = sortAssets(assetsQuery.data ?? []).filter((asset) => assetKindForContentType(asset.contentType) !== null)
 
   // Auto-expand while a drag hovers this (collapsed) folder.
   const expandTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -651,11 +652,7 @@ function DocRow({ doc, depth, ctx }: { doc: DocMeta; depth: number; ctx: TreeCtx
   )
 }
 
-/**
- * A folder's image asset as a leaf row — visually secondary to docs (smaller,
- * dimmed) so documents stay primary. A real <button>, so it is tabbable and
- * Enter/Space opens the lightbox viewer.
- */
+/** A folder asset as a leaf row — images open the lightbox; HTML opens the sandboxed viewer. */
 function AssetRow({
   folder,
   asset,
@@ -667,6 +664,25 @@ function AssetRow({
   depth: number
   ctx: TreeCtx
 }) {
+  const kind = assetKindForContentType(asset.contentType)
+  if (kind === 'html') {
+    return (
+      <div className="flex items-center gap-1 rounded-md pr-1.5 hover:bg-[var(--paper-soft)]" style={rowIndent(depth)}>
+        <ChevronSpacer />
+        <Link
+          to="/f/$folderId/file/$filename"
+          params={{ folderId: folder.id, filename: asset.filename }}
+          title={asset.filename}
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded py-1 text-xs font-medium text-[var(--ink-soft)] no-underline hover:text-[var(--accent)]"
+        >
+          <FileCode2 size={13} className="shrink-0 text-[var(--ink-faint)]" />
+          <span className="truncate">{asset.filename}</span>
+        </Link>
+      </div>
+    )
+  }
+
+  if (kind !== 'image') return null
   return (
     <div className="flex items-center gap-1 rounded-md pr-1.5 hover:bg-[var(--paper-soft)]" style={rowIndent(depth)}>
       <ChevronSpacer />
