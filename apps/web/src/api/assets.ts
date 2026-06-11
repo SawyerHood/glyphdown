@@ -1,10 +1,10 @@
-import { and, eq, inArray, isNull } from 'drizzle-orm'
+import { and, eq, inArray, isNull, or } from 'drizzle-orm'
 import {
   MAX_ASSET_BYTES,
+  assetKindForContentType,
   normalizeAssetFilename,
   roleAtLeast,
   type AssetMeta,
-  type Role,
   type UploadAssetResponse,
 } from '@glyphdown/protocol'
 import { assets, docs } from '../db/schema.ts'
@@ -13,10 +13,10 @@ import type { AuthContext } from './auth.ts'
 import type { DocRow } from './roles.ts'
 
 /**
- * Doc/folder image assets: bytes in R2 (ASSETS binding), metadata in D1
+ * Doc/folder file assets: bytes in R2 (ASSETS binding), metadata in D1
  * (`assets` table). A doc's asset namespace is its containing folder when it
- * has one — so every doc in a folder shares one image namespace and markdown
- * `![](name.png)` references stay valid across the folder — else the doc
+ * has one — so every doc in a folder shares one asset namespace and markdown
+ * references stay valid across the folder — else the doc
  * itself. Pure helpers (normalizeAssetFilename, uniqueAssetFilename,
  * assetScopeFor) are unit-tested in assets.test.ts.
  *
@@ -155,6 +155,44 @@ function assetMeta(row: AssetRow): AssetMeta {
   }
 }
 
+export async function listFolderAssetMetaMap(
+  db: Db,
+  folderIds: readonly string[],
+  docRows: ReadonlyArray<{ id: string; folderId: string | null }>,
+): Promise<Map<string, AssetMeta[]>> {
+  const result = new Map<string, AssetMeta[]>()
+  const folderIdSet = new Set(folderIds)
+  for (const folderId of folderIds) result.set(folderId, [])
+  if (folderIds.length === 0) return result
+
+  const docFolder = new Map<string, string>()
+  for (const doc of docRows) {
+    if (doc.folderId !== null && folderIdSet.has(doc.folderId)) docFolder.set(doc.id, doc.folderId)
+  }
+
+  const ownCondition = and(inArray(assets.folderId, [...folderIds]), isNull(assets.docId))
+  const where =
+    docFolder.size === 0
+      ? ownCondition
+      : or(ownCondition, and(inArray(assets.docId, [...docFolder.keys()]), isNull(assets.folderId)))
+  const rows = await db.select().from(assets).where(where)
+
+  const byFolder = new Map<string, Map<string, AssetRow>>()
+  for (const folderId of folderIds) byFolder.set(folderId, new Map())
+  for (const row of rows.filter((r) => r.docId !== null).sort(byAge)) {
+    const folderId = docFolder.get(row.docId!)
+    if (folderId) {
+      const byName = byFolder.get(folderId)!
+      if (!byName.has(row.filename)) byName.set(row.filename, row)
+    }
+  }
+  for (const row of rows) {
+    if (row.folderId !== null) byFolder.get(row.folderId)?.set(row.filename, row)
+  }
+  for (const [folderId, byName] of byFolder) result.set(folderId, [...byName.values()].map(assetMeta))
+  return result
+}
+
 // ---------------------------------------------------------------------------
 // Handlers (auth/role already resolved by the router)
 // ---------------------------------------------------------------------------
@@ -201,17 +239,17 @@ export async function handleDocAssets(
 
 /**
  * Folder-scoped asset surface (CLI pull/sync + the file-tree sidebar): list,
- * download, and delete. Uploads stay doc-scoped so role logic remains
- * per-doc; deletion mirrors the doc-scoped gate (editor+ — here the caller's
- * effective folder role, resolved by the router).
+ * upload, download, and delete. Upload/delete mirror the doc-scoped gate
+ * (editor+ — here the caller's effective folder role, resolved by the router).
  */
 export async function handleFolderAssets(
   db: Db,
   bucket: R2Bucket,
   request: Request,
+  url: URL,
   folderId: string,
   subPath: string,
-  role: Role | null,
+  auth: AuthContext | null,
 ): Promise<Response> {
   const scope: AssetScope = { kind: 'folder', id: folderId }
   // Legacy doc-scoped rows of docs homed here resolve through this surface
@@ -219,6 +257,10 @@ export async function handleFolderAssets(
   const fallbackIds = await fallbackDocIdsFor(db, folderId)
   if (subPath === '/assets' || subPath === '/assets/') {
     if (request.method === 'GET') return listAssets(db, scope, fallbackIds)
+    if (request.method === 'POST') {
+      if (auth === null || !roleAtLeast(auth.role, 'editor')) return json({ error: 'forbidden' }, 403)
+      return uploadAsset(db, bucket, request, url, scope, auth)
+    }
     return json({ error: 'method-not-allowed' }, 405)
   }
   const match = subPath.match(/^\/assets\/([^/]+)$/)
@@ -227,7 +269,7 @@ export async function handleFolderAssets(
   if (request.method === 'GET') return streamAsset(db, bucket, scope, filename, fallbackIds)
   if (request.method === 'DELETE') {
     // Same gate as the doc-scoped delete (SPEC §4): editor+ only.
-    if (role === null || !roleAtLeast(role, 'editor')) return json({ error: 'forbidden' }, 403)
+    if (auth === null || !roleAtLeast(auth.role, 'editor')) return json({ error: 'forbidden' }, 403)
     return deleteAsset(db, bucket, scope, filename, fallbackIds)
   }
   return json({ error: 'method-not-allowed' }, 405)
@@ -252,7 +294,7 @@ async function uploadAsset(
   if (!normalized) return json({ error: 'bad-filename' }, 400)
 
   const contentType = (request.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase()
-  if (!contentType.startsWith('image/')) return json({ error: 'unsupported-content-type' }, 415)
+  if (assetKindForContentType(contentType) === null) return json({ error: 'unsupported-content-type' }, 415)
 
   const declared = Number(request.headers.get('content-length') ?? '0')
   if (declared > MAX_ASSET_BYTES) return json({ error: 'too-large' }, 413)
@@ -313,6 +355,10 @@ async function streamAsset(
     etag: object.httpEtag,
     'cache-control': 'private, max-age=3600',
   })
+  if (assetKindForContentType(row.contentType) === 'html') {
+    headers.set('content-security-policy', 'sandbox allow-scripts')
+    headers.set('x-content-type-options', 'nosniff')
+  }
   return new Response(object.body as unknown as BodyInit, { headers })
 }
 

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import Database from 'better-sqlite3'
 import { drizzle } from 'drizzle-orm/better-sqlite3'
-import type { DocMeta, FolderMeta, VaultMeta } from '@glyphdown/protocol'
+import type { DocMeta, FolderListingResponse, FolderMeta, VaultMeta } from '@glyphdown/protocol'
 import type { Db } from '../db/client.ts'
 
 /**
@@ -365,6 +365,37 @@ describe('GET /api/folders/:id/assets with an inherited grant', () => {
   })
 })
 
+describe('POST /api/folders/:id/assets', () => {
+  it('uploads html for inherited editor+ roles and forbids viewers', async () => {
+    principalFor('alice')
+    const bob = principalFor('bob')
+    const eve = principalFor('eve')
+    seedVault('v1', 'alice')
+    seedFolder('sub', 'alice', 'v1')
+    raw.prepare(`INSERT INTO folder_members (folder_id, principal_id, principal_type, role, created_at) VALUES ('v1', 'bob', 'user', 'viewer', 1)`).run()
+    raw.prepare(`INSERT INTO folder_members (folder_id, principal_id, principal_type, role, created_at) VALUES ('v1', 'eve', 'user', 'editor', 1)`).run()
+
+    const denied = await api('/api/folders/sub/assets?filename=viewer.html', {
+      method: 'POST',
+      headers: { ...bob, 'content-type': 'text/html' },
+      body: '<!doctype html>',
+    })
+    expect(denied!.status).toBe(403)
+
+    const uploaded = await api('/api/folders/sub/assets?filename=Page.HTML', {
+      method: 'POST',
+      headers: { ...eve, 'content-type': 'text/html; charset=utf-8' },
+      body: '<!doctype html>',
+    })
+    expect(uploaded!.status).toBe(200)
+    expect(await jsonOf<{ asset: { filename: string; contentType: string }; path: string }>(uploaded)).toMatchObject({
+      asset: { filename: 'page.html', contentType: 'text/html' },
+      path: 'page.html',
+    })
+    expect(h.objects.has('folder/sub/page.html')).toBe(true)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Asset read fallback (legacy doc-scoped rows after re-homing)
 // ---------------------------------------------------------------------------
@@ -693,7 +724,7 @@ function seedShareLink(
   ).run(token, targetType, targetId, role, revokedAt)
 }
 
-type Listing = { folder: FolderMeta; folders: FolderMeta[]; docs: DocMeta[] }
+type Listing = FolderListingResponse
 
 /** alice's two vaults: v1 (sub + two docs) and a sibling v2 (one doc). */
 function seedSharedTree(): void {
@@ -716,6 +747,23 @@ describe('GET /api/folders/:id/listing', () => {
     expect(listing.folders.map((f) => f.id)).toEqual(['sub'])
     expect(listing.docs.map((d) => d.id).sort()).toEqual(['d-a', 'd-b'])
     expect(listing.docs.every((d) => d.role === 'viewer')).toBe(true)
+  })
+
+  it('includes assets on each folder node', async () => {
+    seedSharedTree()
+    seedShareLink('tok-v1', 'folder', 'v1')
+    raw.prepare(`INSERT INTO assets (id, folder_id, doc_id, filename, r2_key, content_type, size, etag, created_by, created_at)
+                 VALUES ('a-v1', 'v1', NULL, 'page.html', 'folder/v1/page.html', 'text/html', 15, 'e-html', 'alice', 1)`).run()
+    raw.prepare(`INSERT INTO assets (id, folder_id, doc_id, filename, r2_key, content_type, size, etag, created_by, created_at)
+                 VALUES ('a-sub', 'sub', NULL, 'pic.png', 'folder/sub/pic.png', 'image/png', 3, 'e-png', 'alice', 2)`).run()
+
+    const listing = await jsonOf<Listing>(await api('/api/folders/v1/listing?share=tok-v1'))
+    expect(listing.folder.assets).toEqual([
+      expect.objectContaining({ filename: 'page.html', contentType: 'text/html', etag: 'e-html' }),
+    ])
+    expect(listing.folders.find((f) => f.id === 'sub')?.assets).toEqual([
+      expect.objectContaining({ filename: 'pic.png', contentType: 'image/png', etag: 'e-png' }),
+    ])
   })
 
   it('admits the token on any folder INSIDE the link target (navigating into a subfolder)', async () => {

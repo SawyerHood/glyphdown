@@ -157,9 +157,11 @@ const folderedDoc: DocRow = {
 const looseDoc: DocRow = { ...folderedDoc, id: 'doc-2', folderId: null }
 
 const editorAuth: AuthContext = { principal: { id: 'owner-1', type: 'user', name: 'Owner' }, role: 'owner' }
+const viewerAuth: AuthContext = { principal: { id: 'vera', type: 'user', name: 'Vera' }, role: 'viewer' }
 const suggesterAuth: AuthContext = { principal: { id: 'sam', type: 'user', name: 'Sam' }, role: 'suggester' }
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3])
+const HTML = new TextEncoder().encode('<!doctype html><script>window.ok = true</script>')
 
 function uploadRequest(filename: string, opts: { contentType?: string; body?: Uint8Array; overwrite?: boolean } = {}) {
   const url = new URL(`https://x/api/docs/doc-1/assets?filename=${encodeURIComponent(filename)}${opts.overwrite ? '&overwrite=true' : ''}`)
@@ -193,6 +195,17 @@ describe('handleDocAssets', () => {
     expect(body.asset.filename).toBe('my-pic.png')
     expect(body.asset.size).toBe(PNG.byteLength)
     expect(objects.has('folder/folder-1/my-pic.png')).toBe(true)
+  })
+
+  it('uploads text/html and preserves the html extension', async () => {
+    const db = setupDb()
+    const { bucket, objects } = fakeBucket()
+    const res = await upload(db, bucket, folderedDoc, 'Page.HTML', { contentType: 'text/html; charset=utf-8', body: HTML })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as UploadAssetResponse
+    expect(body.path).toBe('page.html')
+    expect(body.asset).toMatchObject({ filename: 'page.html', contentType: 'text/html', size: HTML.byteLength })
+    expect(objects.has('folder/folder-1/page.html')).toBe(true)
   })
 
   it('uploads into the doc namespace for a folderless doc', async () => {
@@ -231,9 +244,10 @@ describe('handleDocAssets', () => {
     expect(rows.map((a) => a.filename).sort()).toEqual(['pic-2.png', 'pic.png'])
   })
 
-  it('rejects suggester uploads (editor+ only)', async () => {
+  it('rejects uploads below editor', async () => {
     const db = setupDb()
     const { bucket } = fakeBucket()
+    expect((await upload(db, bucket, folderedDoc, 'pic.png', { auth: viewerAuth })).status).toBe(403)
     const res = await upload(db, bucket, folderedDoc, 'pic.png', { auth: suggesterAuth })
     expect(res.status).toBe(403)
   })
@@ -270,9 +284,32 @@ describe('handleDocAssets', () => {
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toBe('image/png')
     expect(res.headers.get('cache-control')).toBe('private, max-age=3600')
+    expect(res.headers.get('content-security-policy')).toBeNull()
+    expect(res.headers.get('x-content-type-options')).toBeNull()
     expect(res.headers.get('etag')).toBeTruthy()
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(PNG)
     expect((await get('missing.png')).status).toBe(404)
+  })
+
+  it('adds sandbox headers when streaming html assets', async () => {
+    const db = setupDb()
+    const { bucket } = fakeBucket()
+    await upload(db, bucket, folderedDoc, 'Page.HTML', { contentType: 'text/html', body: HTML })
+    const res = await handleDocAssets(
+      db,
+      bucket,
+      new Request('https://x/api/docs/doc-1/assets/page.html'),
+      new URL('https://x/api/docs/doc-1/assets/page.html'),
+      folderedDoc,
+      { ...editorAuth, role: 'viewer' },
+      '/assets/page.html',
+    )
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toBe('text/html')
+    expect(res.headers.get('cache-control')).toBe('private, max-age=3600')
+    expect(res.headers.get('content-security-policy')).toBe('sandbox allow-scripts')
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(HTML)
   })
 
   it('deletes row + object for editor+, forbids suggesters', async () => {
@@ -299,9 +336,28 @@ describe('handleDocAssets', () => {
 describe('handleFolderAssets', () => {
   const folderId = 'folder-1' // matches folderedDoc's namespace
 
-  const folderReq = (method: string, sub: string, role: Parameters<typeof handleFolderAssets>[5]) =>
-    (db: Db, bucket: R2Bucket) =>
-      handleFolderAssets(db, bucket, new Request(`https://x/api/folders/${folderId}${sub}`, { method }), folderId, sub, role)
+  const authWithRole = (role: AuthContext['role'] | null): AuthContext | null =>
+    role === null ? null : { ...editorAuth, role }
+
+  const folderReq = (method: string, sub: string, role: AuthContext['role'] | null) => (db: Db, bucket: R2Bucket) => {
+    const url = new URL(`https://x/api/folders/${folderId}${sub}`)
+    return handleFolderAssets(db, bucket, new Request(url, { method }), url, folderId, sub, authWithRole(role))
+  }
+
+  const folderUpload = (
+    db: Db,
+    bucket: R2Bucket,
+    filename: string,
+    opts: { contentType?: string; body?: Uint8Array; auth?: AuthContext | null } = {},
+  ) => {
+    const url = new URL(`https://x/api/folders/${folderId}/assets?filename=${encodeURIComponent(filename)}`)
+    const request = new Request(url, {
+      method: 'POST',
+      headers: { 'content-type': opts.contentType ?? 'image/png' },
+      body: (opts.body ?? PNG) as unknown as BodyInit,
+    })
+    return handleFolderAssets(db, bucket, request, url, folderId, '/assets', opts.auth ?? editorAuth)
+  }
 
   it('lists the folder namespace (docs in the folder share it)', async () => {
     const db = setupDb()
@@ -320,7 +376,28 @@ describe('handleFolderAssets', () => {
     const res = await folderReq('GET', '/assets/pic.png', 'viewer')(db, bucket)
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toBe('image/png')
+    expect(res.headers.get('content-security-policy')).toBeNull()
+    expect(res.headers.get('x-content-type-options')).toBeNull()
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(PNG)
+  })
+
+  it('uploads text/html for editor+ on the folder surface and rejects viewers', async () => {
+    const db = setupDb()
+    const { bucket, objects } = fakeBucket()
+    const uploaded = await folderUpload(db, bucket, 'Folder Page.HTM', { contentType: 'text/html', body: HTML })
+    expect(uploaded.status).toBe(200)
+    const body = (await uploaded.json()) as UploadAssetResponse
+    expect(body.path).toBe('folder-page.htm')
+    expect(body.asset).toMatchObject({ filename: 'folder-page.htm', contentType: 'text/html' })
+    expect(objects.has('folder/folder-1/folder-page.htm')).toBe(true)
+
+    const denied = await folderUpload(db, bucket, 'viewer.html', { contentType: 'text/html', body: HTML, auth: viewerAuth })
+    expect(denied.status).toBe(403)
+
+    const streamed = await folderReq('GET', '/assets/folder-page.htm', 'viewer')(db, bucket)
+    expect(streamed.status).toBe(200)
+    expect(streamed.headers.get('content-security-policy')).toBe('sandbox allow-scripts')
+    expect(streamed.headers.get('x-content-type-options')).toBe('nosniff')
   })
 
   it('deletes for editor+ (row and object), mirroring the doc-scoped gate', async () => {
@@ -342,10 +419,10 @@ describe('handleFolderAssets', () => {
     expect(objects.size).toBe(1)
   })
 
-  it('rejects uploads on the folder surface (405 — uploads stay doc-scoped)', async () => {
+  it('rejects folder uploads without editor role', async () => {
     const db = setupDb()
     const { bucket } = fakeBucket()
-    const res = await folderReq('POST', '/assets', 'owner')(db, bucket)
-    expect(res.status).toBe(405)
+    const res = await folderUpload(db, bucket, 'pic.png', { auth: authWithRole('suggester') })
+    expect(res.status).toBe(403)
   })
 })

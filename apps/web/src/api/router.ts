@@ -1,7 +1,17 @@
 import { env, waitUntil } from 'cloudflare:workers'
 import { getServerByName, type Server } from 'partyserver'
 import { and, desc, eq, inArray, isNull, ne } from 'drizzle-orm'
-import { docFilenameStem, type DocMeta, type FolderListingResponse, type FolderMeta, type Principal, type PushResponse, type Role, type VaultMeta } from '@glyphdown/protocol'
+import {
+  docFilenameStem,
+  type DocMeta,
+  type FolderListingFolderMeta,
+  type FolderListingResponse,
+  type FolderMeta,
+  type Principal,
+  type PushResponse,
+  type Role,
+  type VaultMeta,
+} from '@glyphdown/protocol'
 import { HEADER_COMMENT_AUTHOR } from '@glyphdown/sync'
 import { asAppEnv } from '../env.ts'
 import { createDb, type Db } from '../db/client.ts'
@@ -25,7 +35,7 @@ import {
   type DocRow,
 } from './roles.ts'
 import { MAX_FOLDER_DEPTH, planFolderDelete, propagateFolderRoles, validateMove } from './folder-tree.ts'
-import { handleDocAssets, handleFolderAssets } from './assets.ts'
+import { handleDocAssets, handleFolderAssets, listFolderAssetMetaMap } from './assets.ts'
 import { feedTitleToIndex, handleBacklinks, handleSearch, removeFromIndex } from './search.ts'
 import { availableFilename, filenameForCreate, filenameFromPatch } from './filenames.ts'
 import { ensureDefaultVault } from './vaults.ts'
@@ -696,11 +706,10 @@ async function handleFolders(db: Db, request: Request, url: URL): Promise<Respon
     // any folder member may list/download — INHERITED grants included (a
     // member granted on a vault root reads assets in every subfolder), so
     // guard on the already-resolved folderRole, not a direct-membership
-    // lookup. Uploads stay on the doc routes so role logic remains per-doc;
-    // deletes additionally require editor+ on the folder (enforced inside,
-    // mirroring the doc-scoped delete).
+    // lookup. Uploads and deletes additionally require editor+ on the folder
+    // (enforced inside, mirroring the doc-scoped gate).
     if (folderRole === null) return json({ error: 'not-found' }, 404)
-    return handleFolderAssets(db, asAppEnv(env).ASSETS, request, folder.id, subPath, folderRole)
+    return handleFolderAssets(db, asAppEnv(env).ASSETS, request, url, folder.id, subPath, auth)
   }
   if (subPath === '/share-links' || subPath.startsWith('/share-links/')) {
     return handleShareLinks(db, request, subPath, auth, 'folder', folder.id)
@@ -809,9 +818,20 @@ async function folderListing(
         isNull(docs.deletedAt),
       ),
     )
+  const assetsByFolder = await listFolderAssetMetaMap(
+    db,
+    subtree.map((f) => f.id),
+    docRows,
+  )
+  const listingFolder = (
+    f: Parameters<typeof folderMeta>[0],
+  ): FolderListingFolderMeta => ({
+    ...folderMeta(f, role),
+    assets: assetsByFolder.get(f.id) ?? [],
+  })
   const body: FolderListingResponse = {
-    folder: folderMeta(folder, role),
-    folders: subtree.filter((f) => f.id !== folder.id).map((f) => folderMeta(f, role)),
+    folder: listingFolder(folder),
+    folders: subtree.filter((f) => f.id !== folder.id).map((f) => listingFolder(f)),
     docs: docRows.map((d) => docMeta(d, role)),
   }
   return json(body)

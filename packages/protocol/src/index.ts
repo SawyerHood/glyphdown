@@ -358,26 +358,34 @@ export interface ShareLink {
 //   visitors get max(own grants, link role). Returns the folder plus its
 //   ENTIRE live subtree — never anything outside it.
 
+export interface FolderListingFolderMeta extends FolderMeta {
+  /** Assets scoped to this folder node. */
+  assets: AssetMeta[]
+}
+
 export interface FolderListingResponse {
   /** The requested folder, with the caller's effective role. */
-  folder: FolderMeta
+  folder: FolderListingFolderMeta
   /** Every visible descendant folder (the requested folder excluded). */
-  folders: FolderMeta[]
+  folders: FolderListingFolderMeta[]
   /** Every live doc in the subtree (the requested folder included). */
   docs: DocMeta[]
 }
 
 // ---------------------------------------------------------------------------
-// Assets (images stored in R2, scoped to a doc's folder — or the doc itself
-// when it is folderless)
+// Assets (images and standalone HTML files stored in R2, scoped to a doc's
+// folder — or the doc itself when it is folderless)
 // ---------------------------------------------------------------------------
 // POST   /api/docs/:id/assets?filename=<name>[&overwrite=true]
-//          raw image/* body (≤ 10 MB), role editor+  -> UploadAssetResponse
+//          raw image/* or text/html body (≤ 10 MB), role editor+  -> UploadAssetResponse
 // GET    /api/docs/:id/assets                        -> { assets: AssetMeta[] }
 // GET    /api/docs/:id/assets/<filename>             -> bytes (viewer+, ETag,
 //          cache-control: private; share token via ?share= / X-Glyphdown-Share —
 //          the legacy X-Inkroom-Share header is still accepted)
 // DELETE /api/docs/:id/assets/<filename>             -> { ok: true } (editor+)
+// POST   /api/folders/:id/assets?filename=<name>[&overwrite=true]
+//          raw image/* or text/html body (≤ 10 MB), folder role editor+
+//          -> UploadAssetResponse
 // GET    /api/folders/:id/assets                     -> { assets: AssetMeta[] }
 // GET    /api/folders/:id/assets/<filename>          -> bytes (CLI sync flow)
 // DELETE /api/folders/:id/assets/<filename>          -> { ok: true } (folder
@@ -405,6 +413,21 @@ export const MAX_ASSET_BYTES = 10 * 1024 * 1024 // 10 MB
 
 /** Image extensions the CLI sync scans for (lowercase, no dot). */
 export const IMAGE_FILE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'avif'] as const
+
+/** Standalone HTML asset extensions (lowercase, no dot). */
+export const HTML_FILE_EXTENSIONS = ['html', 'htm'] as const
+
+/** Asset extensions that can be synced as files (lowercase, no dot). */
+export const SYNCABLE_ASSET_FILE_EXTENSIONS = [...IMAGE_FILE_EXTENSIONS, ...HTML_FILE_EXTENSIONS] as const
+
+export type AssetKind = 'image' | 'html'
+
+export function assetKindForContentType(contentType: string): AssetKind | null {
+  const normalized = contentType.split(';')[0]?.trim().toLowerCase() ?? ''
+  if (normalized.startsWith('image/')) return 'image'
+  if (normalized === 'text/html') return 'html'
+  return null
+}
 
 /**
  * Normalize an asset filename the way the server stores it: keep only the
