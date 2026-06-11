@@ -67,7 +67,7 @@ work/                          # clone root
     workspace.json             # {version, serverUrl, clonedAt} — marks a full-account mirror
     <docId>/meta.json          # {docId, serverUrl, baseHash, pulledAt, file, versionId?}
     <docId>/base.md            # the merge base — NEVER edit this
-    assets.json                # image sync state {filename: {etag, size, mtimeMs}}
+    assets.json                # asset sync state {filename: {etag, size, mtimeMs}}
   launch-plan.md               # doc in the workspace root (canonical server filename, verbatim)
   team/                        # vaults and folders alike — one dir per server folder
     .glyphdown/folder.json     # {folderId, folderName, serverUrl} — dir ↔ folder, keyed by id
@@ -236,14 +236,14 @@ glyphdown share revoke --folder Research <token>     # revoke — the token is t
 
 - The token IS the capability — treat it like a secret; don't paste share URLs into public places unless that's the point. Revoking kills anonymous access immediately (signed-in sessions that rode the link drop at their next request).
 
-## Images / assets
+## Assets
 
-- Only image files sync: `png, jpg, jpeg, gif, webp, svg, avif` — max **10 MB**, uploaded as `image/*`. Everything else (and all dotfiles) is ignored, noted once per sync.
+- Syncable asset files are images (`png, jpg, jpeg, gif, webp, svg, avif`) and standalone HTML files (`html, htm`) — max **10 MB**. Everything else (and all dotfiles) is ignored, noted once per sync.
 - Reference images **folder-relative** in markdown: the file sits next to the doc, embed as `![alt](diagram.png)`. All docs in a folder share one asset namespace; folderless docs each carry their own.
+- HTML files in folder workspaces upload as folder assets and sync prints the viewer URL (`<server>/f/<folderId>/file/<filename>`) when it uploads one.
 - Filenames are normalized server-side (basename only, lowercase, whitespace → `-`); the CLI records the server's name if it differs.
-- Conflict rule: an image changed both locally and on the server keeps the **local** copy with a warning (`conflict-local-kept`) — images don't merge.
-- No delete propagation: a deleted local image re-downloads on the next sync.
-- Uploading into a folder requires at least one tracked doc in it (uploads ride a doc route): `no doc in this folder to upload through — pull a doc first`.
+- Conflict rule: an asset changed both locally and on the server keeps the **local** copy with a warning (`conflict-local-kept`) — assets don't merge.
+- No delete propagation: a deleted local asset re-downloads on the next sync.
 
 ## Multi-agent / shared-doc etiquette
 

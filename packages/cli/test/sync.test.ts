@@ -108,7 +108,7 @@ describe('glyphdown sync + push --all with assets', () => {
 
     await h.run(['sync', target])
     expect(state.assets.get('local.png')!.data).toEqual(localBytes)
-    expect(state.assetUploads.at(-1)).toMatchObject({ docId: 'd1', filename: 'local.png', overwrite: false })
+    expect(state.assetUploads.at(-1)).toMatchObject({ scope: 'folder', id: 'f1', filename: 'local.png', overwrite: false })
     expect(new Uint8Array(readFileSync(join(target, 'added-later.png')))).toEqual(new Uint8Array([4, 4]))
     expect(h.lines.some((l) => l.includes('asset local.png') && l.includes('pushed'))).toBe(true)
     expect(h.lines.some((l) => l.includes('asset added-later.png') && l.includes('pulled'))).toBe(true)
@@ -131,7 +131,7 @@ describe('glyphdown sync + push --all with assets', () => {
 
     await h.run(['push', '--all', target])
     expect(state.assets.get('pic.png')!.data).toEqual(edited)
-    expect(state.assetUploads.at(-1)).toMatchObject({ filename: 'pic.png', overwrite: true })
+    expect(state.assetUploads.at(-1)).toMatchObject({ scope: 'folder', id: 'f1', filename: 'pic.png', overwrite: true })
     // push mode never downloads — the deleted local copy stays deleted.
     expect(existsSync(join(target, 'remote-only.png'))).toBe(false)
     expect(h.lines.some((l) => l.includes('asset pic.png') && l.includes('pushed'))).toBe(true)

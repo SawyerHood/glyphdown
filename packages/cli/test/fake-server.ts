@@ -1,4 +1,11 @@
-import { slugifyDocStem, type DocMeta, type PushRequest, type PushResponse, type VaultMeta } from '@glyphdown/protocol'
+import {
+  normalizeAssetFilename,
+  slugifyDocStem,
+  type DocMeta,
+  type PushRequest,
+  type PushResponse,
+  type VaultMeta,
+} from '@glyphdown/protocol'
 import type { FolderMeta } from '../src/index.ts'
 import { createApi, createProgram, md5Hex, sha256Hex, writePull } from '../src/index.ts'
 
@@ -29,7 +36,7 @@ export interface FakeServer {
   pushes: Array<{ docId: string; body: PushRequest }>
   /** One asset namespace for the whole fake server (folder or doc scoped). */
   assets: Map<string, ServerAsset>
-  assetUploads: Array<{ docId: string; filename: string; overwrite: boolean }>
+  assetUploads: Array<{ scope: 'doc' | 'folder'; id: string; filename: string; overwrite: boolean }>
   /** Override push behavior per doc; return undefined for the default apply. */
   onPush?: (docId: string, body: PushRequest) => PushResponse | undefined
   /** Counter for ids minted by POST /api/docs and POST /api/folders. */
@@ -223,9 +230,9 @@ export function fetchFor(state: FakeServer): typeof fetch {
         },
       })
     }
-    const assetUploadMatch = path.match(/^\/api\/docs\/([^/]+)\/assets$/)
+    const assetUploadMatch = path.match(/^\/api\/(docs|folders)\/([^/]+)\/assets$/)
     if (method === 'POST' && assetUploadMatch) {
-      const filename = url.searchParams.get('filename')!.toLowerCase().replace(/\s+/g, '-')
+      const filename = normalizeAssetFilename(url.searchParams.get('filename')!) ?? 'asset'
       const overwrite = url.searchParams.get('overwrite') === 'true'
       const body = init?.body as Uint8Array
       const data = new Uint8Array(body)
@@ -239,7 +246,12 @@ export function fetchFor(state: FakeServer): typeof fetch {
       const contentType = (init?.headers as Record<string, string>)['content-type'] ?? 'image/png'
       const asset = serverAsset(stored, data, contentType)
       state.assets.set(stored, asset)
-      state.assetUploads.push({ docId: assetUploadMatch[1]!, filename: stored, overwrite })
+      state.assetUploads.push({
+        scope: assetUploadMatch[1] === 'folders' ? 'folder' : 'doc',
+        id: assetUploadMatch[2]!,
+        filename: stored,
+        overwrite,
+      })
       return jsonResponse({ asset: assetMetaOf(asset), path: stored })
     }
 

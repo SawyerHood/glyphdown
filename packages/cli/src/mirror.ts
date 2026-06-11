@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import { basename, join, resolve } from 'node:path'
 import { normalizeEol } from '@glyphdown/core'
 import type { DocMeta, FolderMeta } from '@glyphdown/protocol'
-import { IMAGE_FILE_EXTENSIONS, MAX_FOLDER_DEPTH } from '@glyphdown/protocol'
+import { MAX_FOLDER_DEPTH, SYNCABLE_ASSET_FILE_EXTENSIONS } from '@glyphdown/protocol'
 import { type Api, pushWithBase } from './api.ts'
 import { type AssetOps, type AssetSyncResult, docAssetOps, folderAssetOps, pullAssets, syncAssets } from './assets.ts'
 import { CliError } from './errors.ts'
@@ -52,7 +52,7 @@ import { type DocWorkspaceMeta, listMetas, recordBase, sha256Hex, slugify, works
  *    becomes a new doc — warned loudly); use `glyphdown mv` instead.
  *  - Server folder renames/moves are noted (folder.json name refreshed) but
  *    local directories are never renamed or moved.
- *  - Dotfiles (including the bookkeeping dir) and non-markdown/non-image
+ *  - Dotfiles (including the bookkeeping dir) and non-markdown/non-asset
  *    files are ignored.
  */
 
@@ -98,10 +98,10 @@ export function isWorkspace(dir: string): boolean {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-const IMAGE_EXTENSION_SET = new Set<string>(IMAGE_FILE_EXTENSIONS)
+const SYNCABLE_ASSET_EXTENSION_SET = new Set<string>(SYNCABLE_ASSET_FILE_EXTENSIONS)
 
-function isImageFile(name: string): boolean {
-  return IMAGE_EXTENSION_SET.has(name.slice(name.lastIndexOf('.') + 1).toLowerCase())
+function isSyncableAssetFile(name: string): boolean {
+  return SYNCABLE_ASSET_EXTENSION_SET.has(name.slice(name.lastIndexOf('.') + 1).toLowerCase())
 }
 
 function isMarkdownFile(name: string): boolean {
@@ -291,11 +291,11 @@ export async function clone(opts: CloneOptions): Promise<CloneResult> {
   // Assets: per folder (folder namespace) and per root doc (own namespace).
   // A vault clone's root IS a folder namespace — the vault's.
   for (const [folderId, { abs, rel }] of dirByFolderId) {
-    const results = await pullAssets({ dir: abs, ops: folderAssetOps(opts.api, folderId, null), err: opts.err })
+    const results = await pullAssets({ dir: abs, ops: folderAssetOps(opts.api, folderId), err: opts.err })
     failures += reportAssetPulls(results, rel, opts)
   }
   if (opts.vault) {
-    const results = await pullAssets({ dir: root, ops: folderAssetOps(opts.api, opts.vault.id, null), err: opts.err })
+    const results = await pullAssets({ dir: root, ops: folderAssetOps(opts.api, opts.vault.id), err: opts.err })
     failures += reportAssetPulls(results, '', opts)
   }
   for (const docId of rootDocIds) {
@@ -448,13 +448,13 @@ export async function syncWorkspace(opts: MirrorSyncOptions): Promise<MirrorSync
         dirs.push(node)
         nodeByRel.set(childRel, node)
         walk(node.abs, childRel)
-      } else if (entry.isFile() && !isMarkdownFile(entry.name) && !isImageFile(entry.name)) {
+      } else if (entry.isFile() && !isMarkdownFile(entry.name) && !isSyncableAssetFile(entry.name)) {
         ignored++
       }
     }
   }
   walk(opts.dir, '')
-  if (ignored > 0) notes.push(`ignored ${ignored} non-markdown, non-image file(s) — only .md and images sync`)
+  if (ignored > 0) notes.push(`ignored ${ignored} non-markdown, non-asset file(s) — only .md, images, and HTML sync`)
 
   // ---- Phase B: map linked dirs by folder id ------------------------------
   const dirByFolderKey = new Map<string | null, DirNode>([[rootKey, rootNode]])
@@ -644,7 +644,7 @@ export async function syncWorkspace(opts: MirrorSyncOptions): Promise<MirrorSync
     const firstDocId = freshMetas[0]?.docId ?? null
     let ops: AssetOps | null = null
     if (typeof node.folderId === 'string' && node.skipCreation !== true) {
-      ops = folderAssetOps(api, node.folderId, firstDocId)
+      ops = folderAssetOps(api, node.folderId, serverUrl)
     } else if (node.rel === '' && node.folderId === null && firstDocId !== null) {
       // Mirror root: folderless docs carry their own namespace — ride the first.
       ops = docAssetOps(api, firstDocId)
@@ -709,11 +709,11 @@ async function syncPlainDir(opts: MirrorSyncOptions): Promise<MirrorSyncOutcome>
   return { results, assetResults, notes: [] }
 }
 
-/** True when the dir (recursively) contains anything that syncs (.md/image). */
+/** True when the dir (recursively) contains anything that syncs (.md/assets). */
 function hasSyncableContent(abs: string): boolean {
   for (const entry of readdirSync(abs, { withFileTypes: true })) {
     if (entry.name.startsWith('.')) continue
-    if (entry.isFile() && (isMarkdownFile(entry.name) || isImageFile(entry.name))) return true
+    if (entry.isFile() && (isMarkdownFile(entry.name) || isSyncableAssetFile(entry.name))) return true
     if (entry.isDirectory() && hasSyncableContent(join(abs, entry.name))) return true
   }
   return false
