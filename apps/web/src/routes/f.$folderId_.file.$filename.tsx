@@ -12,7 +12,7 @@ import { Spinner } from '../components/ui.tsx'
  * raw asset response still carries the server CSP sandbox.
  */
 
-export const Route = createFileRoute('/f/$folderId/file/$filename')({
+export const Route = createFileRoute('/f/$folderId_/file/$filename')({
   validateSearch: (search: Record<string, unknown>): { share?: string } => ({
     ...(typeof search['share'] === 'string' && search['share'] !== '' ? { share: search['share'] } : {}),
   }),
