@@ -85,7 +85,7 @@ export function createProgram(deps: ProgramDeps = {}): Command {
     const folderConfig = readFolderConfig(dir)
     const metas = listMetas(dir).sort((a, b) => a.file.localeCompare(b.file))
     if (folderConfig) {
-      return folderAssetOps(apiFor(folderConfig.serverUrl), folderConfig.folderId, folderConfig.serverUrl)
+      return folderAssetOps(apiFor(folderConfig.serverUrl), folderConfig.folderId, folderConfig.serverUrl, metas[0]?.docId ?? null)
     }
     const meta = metas[0]
     if (meta) return docAssetOps(apiFor(meta.serverUrl), meta.docId)

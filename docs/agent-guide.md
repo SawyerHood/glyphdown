@@ -115,12 +115,12 @@ Workspace-level actions in the same run:
 |---|---|---|
 | new local `.md` file | `created` | new server doc named after the file (slugified if messy; local file renames to match), in the folder matching its directory, content pushed |
 | tracked file's name ≠ server filename (web-UI rename / migration) | `renamed locally: old → new` (note) | local file renamed to the canonical name, manifest updated |
-| new local directory containing `.md`/images | `folder created` | server folder created at the matching path; empty dirs skipped |
+| new local directory containing `.md`/assets | `folder created` | server folder created at the matching path; empty dirs skipped |
 | new server doc | `new` | materialized into the matching local dir |
 | new server folder | `new folder (server)` | materialized as a nested local dir |
 | server folder rename/move | `folder renamed (server)` | noted only; the local dir is NOT renamed/moved (mapping is by folder id) |
 
-**Deletions never propagate in either direction** (docs and images both): delete on the server via the web UI when you mean it.
+**Deletions never propagate in either direction** (docs and assets both): delete on the server via the web UI when you mean it.
 
 **Local renames are not detected.** Renaming a tracked file by hand re-pulls the old name AND creates a duplicate doc from the new file — sync warns loudly when it sees that pattern. Use `glyphdown mv <file> <new-name>` (server rename first — a `filename taken` collision aborts before anything moves — then the local file and manifest).
 

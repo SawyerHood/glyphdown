@@ -114,7 +114,7 @@ vi.mock('../lib/analytics.ts', () => ({ track: vi.fn() }))
 
 import FileBrowser from '../components/browser/FileBrowser.tsx'
 import { SubtreeBrowser } from './f.$folderId.tsx'
-import { HtmlAssetViewerChrome } from './f.$folderId.file.$filename.tsx'
+import { HtmlAssetViewerChrome } from './f.$folderId_.file.$filename.tsx'
 
 function asset(id: string, filename: string, contentType: string): AssetMeta {
   return {

@@ -37,6 +37,8 @@ export interface FakeServer {
   /** One asset namespace for the whole fake server (folder or doc scoped). */
   assets: Map<string, ServerAsset>
   assetUploads: Array<{ scope: 'doc' | 'folder'; id: string; filename: string; overwrite: boolean }>
+  /** Simulate older servers that do not expose POST /api/folders/:id/assets. */
+  folderAssetUploadStatus?: number
   /** Override push behavior per doc; return undefined for the default apply. */
   onPush?: (docId: string, body: PushRequest) => PushResponse | undefined
   /** Counter for ids minted by POST /api/docs and POST /api/folders. */
@@ -232,6 +234,9 @@ export function fetchFor(state: FakeServer): typeof fetch {
     }
     const assetUploadMatch = path.match(/^\/api\/(docs|folders)\/([^/]+)\/assets$/)
     if (method === 'POST' && assetUploadMatch) {
+      if (assetUploadMatch[1] === 'folders' && state.folderAssetUploadStatus !== undefined) {
+        return jsonResponse({ error: 'method-not-allowed' }, state.folderAssetUploadStatus)
+      }
       const filename = normalizeAssetFilename(url.searchParams.get('filename')!) ?? 'asset'
       const overwrite = url.searchParams.get('overwrite') === 'true'
       const body = init?.body as Uint8Array

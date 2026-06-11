@@ -17,7 +17,7 @@ Full reference: [docs/agent-guide.md](https://github.com/SawyerHood/glyphdown/bl
 
 ```sh
 glyphdown clone work && cd work   # once; mirrors every folder/doc you can access (default dir: ./glyphdown)
-# ... edit .md files, add images, mkdir new folders — normal tools ...
+# ... edit .md files, add images/HTML assets, mkdir new folders — normal tools ...
 glyphdown sync                    # two-way reconcile, run before AND after editing
 ```
 
