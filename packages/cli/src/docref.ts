@@ -20,3 +20,16 @@ export function parseDocRef(ref: string): string {
   if (last) return last
   throw new CliError(1, `cannot extract a doc id from URL: ${ref}`)
 }
+
+/**
+ * The ?share=<token> embedded in a doc/folder URL, when present — lets
+ * `glyphdown share revoke <url-with-token>` work without re-typing the token.
+ */
+export function parseShareToken(ref: string): string | null {
+  if (!/^https?:\/\//i.test(ref)) return null
+  try {
+    return new URL(ref).searchParams.get('share')
+  } catch {
+    return null
+  }
+}

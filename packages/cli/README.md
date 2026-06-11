@@ -306,6 +306,37 @@ glyphdown comment abc123 --reply c42 --body "fixed"   # reply to thread c42
 glyphdown comment abc123 --resolve c42                # resolve (add --body to reply first)
 ```
 
+## Share links (anyone-with-link)
+
+Manage public share links — the same links the web UI's share dialog creates.
+Owner-only on the target doc/folder (other roles get `forbidden`).
+
+```sh
+glyphdown share abc123                        # create a viewer link; prints https://…/d/abc123?share=<token>
+glyphdown share abc123 --role editor --json   # roles: viewer | commenter | suggester | editor
+glyphdown share list abc123 [--json]          # active links: token, role, url
+glyphdown share revoke abc123 <token>         # revoke by token
+glyphdown share revoke "https://glyphdown.com/d/abc123?share=<token>"  # token read from the URL
+```
+
+`glyphdown share <doc>` is shorthand for `glyphdown share create <doc>`
+(default role: viewer). Anyone opening the printed URL gets the link's role
+on the doc; anonymous visitors are capped at viewer.
+
+Folders and vaults take `--folder <folderRef>` (id or exact name — vault
+names work, a vault IS a folder) instead of the doc positional. A folder link
+covers the folder's entire subtree and lands on
+`https://<server>/f/<folderId>?share=<token>`:
+
+```sh
+glyphdown share --folder Research --role commenter
+glyphdown share list --folder Research --json
+glyphdown share revoke --folder Research <token>   # the token is the only positional
+```
+
+The token IS the capability — treat share URLs as secrets. Revoking cuts
+anonymous access immediately.
+
 ## Other commands
 
 ```sh
@@ -317,9 +348,11 @@ glyphdown snapshot abc123 -m "pre-rewrite" # named version (do this before big p
 ## JSON output
 
 Every read command (`list`, `vaults`, `cat`, `comments`, `suggestions`, `new`) takes
-`--json` for machine-readable output, and `glyphdown sync --json` emits the per-doc
-result records. Other write commands print short human-readable
-confirmations; rely on the exit code.
+`--json` for machine-readable output, the `share` subcommands all take `--json`
+(create: `{target, id, token, role, createdAt, url}`; list: `[{token, role,
+createdAt, url}]`; revoke: `{ok, target, id, token}`), and `glyphdown sync --json`
+emits the per-doc result records. Other write commands print short
+human-readable confirmations; rely on the exit code.
 
 ## Notes for integrators
 

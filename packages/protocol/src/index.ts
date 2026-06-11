@@ -323,6 +323,30 @@ export interface VaultMeta {
 export const MAX_FOLDER_DEPTH = 11
 
 // ---------------------------------------------------------------------------
+// Share links (anyone-with-link grants on a doc or folder)
+// ---------------------------------------------------------------------------
+// GET    /api/docs/:id/share-links            -> { shareLinks: ShareLink[] } (active links only)
+// POST   /api/docs/:id/share-links            -> { role: ShareLinkRole } -> ShareLink
+// DELETE /api/docs/:id/share-links/:token     -> { ok: true } (revoke; idempotent)
+// ...and the same three under /api/folders/:id/share-links. All owner-only
+// (403 otherwise). A folder link grants its role over the folder's ENTIRE
+// subtree. Visitors present the token as ?share=<token> (or the
+// X-Glyphdown-Share header); the shareable URLs are the web landing pages:
+//   doc:    https://<server>/d/<docId>?share=<token>
+//   folder: https://<server>/f/<folderId>?share=<token>
+
+/** Roles a share link can grant — every role except owner. */
+export const SHARE_LINK_ROLES = ['viewer', 'commenter', 'suggester', 'editor'] as const
+export type ShareLinkRole = (typeof SHARE_LINK_ROLES)[number]
+
+/** One active anyone-with-link grant. The token IS the capability — treat it as a secret. */
+export interface ShareLink {
+  token: string
+  role: ShareLinkRole
+  createdAt: number
+}
+
+// ---------------------------------------------------------------------------
 // Folder share-link landing surface
 // ---------------------------------------------------------------------------
 // GET /api/folders/:id/listing            -> FolderListingResponse

@@ -34,6 +34,10 @@ Resolution order: `GLYPHDOWN_API_KEY` env → `GLYPHDOWN_SERVER` env → the con
 | `glyphdown comments <doc> [--json]` | list open comment threads with anchor quotes |
 | `glyphdown comment <doc> --body <b> [--reply <id>] [--resolve <id>] [--line <n>]` | add / reply / resolve comments |
 | `glyphdown suggestions <doc> [--json]` | list open suggestions with their +/− parts |
+| `glyphdown share <doc> [--role <r>] [--json]` | create an anyone-with-link share link (default role: viewer); prints the URL |
+| `glyphdown share list <doc> [--json]` | active share links for a doc, with URLs |
+| `glyphdown share revoke <doc> <token> [--json]` | revoke a share link (a `?share=<token>` URL needs no separate token) |
+| `glyphdown share [list\|revoke] --folder <folderRef> …` | same three, for a folder/vault (the link covers its whole subtree) |
 | `glyphdown snapshot <doc> -m <msg>` | create a named version (do this before big pushes) |
 
 ## Vaults
@@ -206,6 +210,32 @@ glyphdown comment <doc> --resolve c42                    # resolve; add --body t
 - Comment bodies are markdown; @-mention as `@[userId]`.
 - Good etiquette: when a comment asks for a change, make the edit (push or suggest), then `--reply` with what you did and `--resolve`.
 
+## Share links (anyone-with-link)
+
+Create, list, and revoke public share links — the same links the web UI's
+share dialog manages. **Owner-only** on the target: a non-owner key gets the
+403 `forbidden` error.
+
+```sh
+glyphdown share <doc>                         # create a viewer link; prints the URL
+glyphdown share <doc> --role editor --json    # roles: viewer | commenter | suggester | editor
+glyphdown share list <doc> --json             # active links: token, role, createdAt, url
+glyphdown share revoke <doc> <token>          # revoke by token
+glyphdown share revoke "https://glyphdown.com/d/<docId>?share=<token>"   # token read from the URL
+```
+
+- `glyphdown share <doc>` is shorthand for `glyphdown share create <doc>`; the default role is **viewer**.
+- The printed URL is the web landing page: `https://<server>/d/<docId>?share=<token>`. Anyone with it gets the link's role on the doc (anonymous visitors are capped at viewer).
+- **Folders and vaults** use `--folder <folderRef>` (id or exact name; vault names work — a vault IS a folder) instead of the doc positional. A folder link grants its role over the folder's **entire subtree**, and its URL is `https://<server>/f/<folderId>?share=<token>`:
+
+```sh
+glyphdown share --folder Research --role commenter   # create
+glyphdown share list --folder Research --json        # list
+glyphdown share revoke --folder Research <token>     # revoke — the token is the only positional
+```
+
+- The token IS the capability — treat it like a secret; don't paste share URLs into public places unless that's the point. Revoking kills anonymous access immediately (signed-in sessions that rode the link drop at their next request).
+
 ## Images / assets
 
 - Only image files sync: `png, jpg, jpeg, gif, webp, svg, avif` — max **10 MB**, uploaded as `image/*`. Everything else (and all dotfiles) is ignored, noted once per sync.
@@ -247,5 +277,6 @@ glyphdown comment <doc> --resolve c42                    # resolve; add --body t
 - `glyphdown sync --json` → `[{docId, file, action, failedHunks?, message?}]` — one record per doc AND per folder action (folder actions use the folder id as `docId` and `dir/` as `file`). Asset outcomes ride stderr/human output, not the JSON.
 - `glyphdown comments <doc> --json` → open `Comment[]` (anchor quotes, replies, reactions)
 - `glyphdown suggestions <doc> --json` → open `SuggestionRecord[]` (insert/delete parts with anchors)
+- `glyphdown share … --json` → create: `{target: 'doc'|'folder', id, token, role, createdAt, url}`; list: `[{token, role, createdAt, url}]`; revoke: `{ok: true, target, id, token}`
 
 Write commands print short human-readable confirmations — rely on the exit code.

@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { Comment, DocMeta, PushResponse } from '@glyphdown/protocol'
+import type { Comment, DocMeta, PushResponse, ShareLinkRole } from '@glyphdown/protocol'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Api } from '../src/index.ts'
 import { CliError, createProgram, sha256Hex, writePull } from '../src/index.ts'
@@ -54,6 +54,12 @@ function fakeApi(overrides: Partial<Api> = {}): Api {
       kind: 'named' as const,
       sizeBytes: 10,
     })),
+    listDocShareLinks: vi.fn(async () => [{ token: 'tok1', role: 'viewer' as const, createdAt: 5 }]),
+    createDocShareLink: vi.fn(async (_docId: string, role: ShareLinkRole) => ({ token: 'tok-new', role, createdAt: 6 })),
+    revokeDocShareLink: vi.fn(async () => undefined),
+    listFolderShareLinks: vi.fn(async () => [{ token: 'ftok1', role: 'editor' as const, createdAt: 7 }]),
+    createFolderShareLink: vi.fn(async (_folderId: string, role: ShareLinkRole) => ({ token: 'ftok-new', role, createdAt: 8 })),
+    revokeFolderShareLink: vi.fn(async () => undefined),
     listDocAssets: vi.fn(async () => []),
     listFolderAssets: vi.fn(async () => []),
     downloadDocAsset: vi.fn(async () => ({ data: new Uint8Array(), etag: null, contentType: null })),
@@ -256,6 +262,141 @@ describe('ink comment', () => {
     await h.run(['comment', 'doc1', '--resolve', 'c9', '--body', 'done'])
     expect(api.replyToComment).toHaveBeenCalledWith('doc1', 'c9', 'done')
     expect(api.resolveComment).toHaveBeenCalledWith('doc1', 'c9', true)
+  })
+})
+
+describe('glyphdown share', () => {
+  const FOLDER = {
+    id: 'f1',
+    name: 'Research',
+    kind: 'vault' as const,
+    parentId: null,
+    ownerUserId: 'u1',
+    role: 'owner' as const,
+    createdAt: 1,
+  }
+
+  it('bare `share <doc>` creates a viewer link and prints the share URL first', async () => {
+    const api = fakeApi()
+    const h = harness(tmp(), api)
+    await h.run(['share', 'https://ink.example/d/doc1'])
+    expect(api.createDocShareLink).toHaveBeenCalledWith('doc1', 'viewer')
+    expect(h.lines[0]).toBe('https://ink.example/d/doc1?share=tok-new')
+  })
+
+  it('forwards --role and emits the JSON shape with the url', async () => {
+    const api = fakeApi()
+    const h = harness(tmp(), api)
+    await h.run(['share', 'doc1', '--role', 'editor', '--json'])
+    expect(api.createDocShareLink).toHaveBeenCalledWith('doc1', 'editor')
+    expect(JSON.parse(h.lines.join('\n'))).toEqual({
+      target: 'doc',
+      id: 'doc1',
+      token: 'tok-new',
+      role: 'editor',
+      createdAt: 6,
+      url: 'https://ink.example/d/doc1?share=tok-new',
+    })
+  })
+
+  it('rejects a bad --role with exit 1 before hitting the API', async () => {
+    const api = fakeApi()
+    const h = harness(tmp(), api)
+    await expect(h.run(['share', 'doc1', '--role', 'owner'])).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(CliError)
+      expect((error as CliError).exitCode).toBe(1)
+      expect((error as CliError).message).toContain('viewer, commenter, suggester, editor')
+      return true
+    })
+    expect(api.createDocShareLink).not.toHaveBeenCalled()
+  })
+
+  it('share list prints token, role, and url per link (and the JSON shape)', async () => {
+    const h = harness(tmp(), fakeApi())
+    await h.run(['share', 'list', 'doc1', '--json'])
+    expect(JSON.parse(h.lines.join('\n'))).toEqual([
+      { token: 'tok1', role: 'viewer', createdAt: 5, url: 'https://ink.example/d/doc1?share=tok1' },
+    ])
+
+    const h2 = harness(tmp(), fakeApi())
+    await h2.run(['share', 'list', 'doc1'])
+    expect(h2.lines.join('\n')).toContain('https://ink.example/d/doc1?share=tok1')
+  })
+
+  it('share list reports an empty result', async () => {
+    const h = harness(tmp(), fakeApi({ listDocShareLinks: vi.fn(async () => []) }))
+    await h.run(['share', 'list', 'doc1'])
+    expect(h.lines.join('\n')).toContain('no share links')
+  })
+
+  it('share revoke passes the token through', async () => {
+    const api = fakeApi()
+    const h = harness(tmp(), api)
+    await h.run(['share', 'revoke', 'doc1', 'tok1'])
+    expect(api.revokeDocShareLink).toHaveBeenCalledWith('doc1', 'tok1')
+    expect(h.lines.join('\n')).toContain('revoked share link tok1')
+  })
+
+  it('share revoke extracts the token from a ?share= URL', async () => {
+    const api = fakeApi()
+    const h = harness(tmp(), api)
+    await h.run(['share', 'revoke', 'https://ink.example/d/doc1?share=tok9', '--json'])
+    expect(api.revokeDocShareLink).toHaveBeenCalledWith('doc1', 'tok9')
+    expect(JSON.parse(h.lines.join('\n'))).toEqual({ ok: true, target: 'doc', id: 'doc1', token: 'tok9' })
+  })
+
+  it('share revoke without a token errors with exit 1', async () => {
+    const api = fakeApi()
+    const h = harness(tmp(), api)
+    await expect(h.run(['share', 'revoke', 'doc1'])).rejects.toSatisfy((error: unknown) => {
+      expect((error as CliError).exitCode).toBe(1)
+      expect((error as CliError).message).toContain('missing token')
+      return true
+    })
+    expect(api.revokeDocShareLink).not.toHaveBeenCalled()
+  })
+
+  it('--folder resolves the ref and uses the /f/ landing URL', async () => {
+    const api = fakeApi({ listFolders: vi.fn(async () => [FOLDER]) })
+    const h = harness(tmp(), api)
+    await h.run(['share', '--folder', 'Research', '--json'])
+    expect(api.createFolderShareLink).toHaveBeenCalledWith('f1', 'viewer')
+    expect(JSON.parse(h.lines.join('\n'))).toMatchObject({
+      target: 'folder',
+      id: 'f1',
+      token: 'ftok-new',
+      url: 'https://ink.example/f/f1?share=ftok-new',
+    })
+  })
+
+  it('share list --folder lists folder links with /f/ URLs', async () => {
+    const api = fakeApi({ listFolders: vi.fn(async () => [FOLDER]) })
+    const h = harness(tmp(), api)
+    await h.run(['share', 'list', '--folder', 'f1', '--json'])
+    expect(api.listFolderShareLinks).toHaveBeenCalledWith('f1')
+    expect(JSON.parse(h.lines.join('\n'))).toEqual([
+      { token: 'ftok1', role: 'editor', createdAt: 7, url: 'https://ink.example/f/f1?share=ftok1' },
+    ])
+  })
+
+  it('share revoke --folder takes the token as the only positional', async () => {
+    const api = fakeApi({ listFolders: vi.fn(async () => [FOLDER]) })
+    const h = harness(tmp(), api)
+    await h.run(['share', 'revoke', '--folder', 'Research', 'ftok1'])
+    expect(api.revokeFolderShareLink).toHaveBeenCalledWith('f1', 'ftok1')
+  })
+
+  it('errors when both a doc and --folder are passed, or neither', async () => {
+    const api = fakeApi({ listFolders: vi.fn(async () => [FOLDER]) })
+    const h = harness(tmp(), api)
+    await expect(h.run(['share', 'doc1', '--folder', 'f1'])).rejects.toSatisfy((error: unknown) => {
+      expect((error as CliError).message).toContain('not both')
+      return true
+    })
+    await expect(h.run(['share', 'list'])).rejects.toSatisfy((error: unknown) => {
+      expect((error as CliError).message).toContain('missing target')
+      return true
+    })
   })
 })
 
