@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, render, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, waitFor } from '@testing-library/react'
 import { createElement, type ReactNode } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
@@ -267,5 +267,25 @@ describe('DocEditorPage mount → home-like unmount (no infinite loop)', () => {
     expect(h.counters.providerDestroyed).toBe(1) // still destroyed despite the throw
 
     errorSpy.mockRestore()
+  })
+
+  it('comments panel opens from the toolbar and closes via the sheet close button (mobile affordance)', async () => {
+    const view = render(
+      createElement(Wrapper, null, createElement(DocEditorPage, { docId: 'doc-1', share: undefined })),
+    )
+    await settle()
+
+    // Discover + open: the toolbar toggle is a plain tap target (no hover).
+    fireEvent.click(view.getByTitle('Comments & suggestions'))
+    expect(view.getByLabelText('Comments and suggestions')).toBeTruthy()
+
+    // Close: the sheet's explicit close button (shown <lg; the scrim and the
+    // toolbar toggle also dismiss).
+    fireEvent.click(view.getByLabelText('Close panel'))
+    expect(view.queryByLabelText('Comments and suggestions')).toBeNull()
+
+    act(() => {
+      view.unmount()
+    })
   })
 })
