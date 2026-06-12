@@ -19,6 +19,7 @@ import { Route as InviteTokenRouteImport } from './routes/invite.$token'
 import { Route as FFolderIdRouteImport } from './routes/f.$folderId'
 import { Route as DDocIdIndexRouteImport } from './routes/d.$docId.index'
 import { Route as DDocIdHistoryRouteImport } from './routes/d.$docId.history'
+import { Route as FFolderIdFileFilenameRouteImport } from './routes/f.$folderId_.file.$filename'
 
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
@@ -70,6 +71,11 @@ const DDocIdHistoryRoute = DDocIdHistoryRouteImport.update({
   path: '/d/$docId/history',
   getParentRoute: () => rootRouteImport,
 } as any)
+const FFolderIdFileFilenameRoute = FFolderIdFileFilenameRouteImport.update({
+  id: '/f/$folderId_/file/$filename',
+  path: '/f/$folderId/file/$filename',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -82,6 +88,7 @@ export interface FileRoutesByFullPath {
   '/invite/$token': typeof InviteTokenRoute
   '/d/$docId/history': typeof DDocIdHistoryRoute
   '/d/$docId/': typeof DDocIdIndexRoute
+  '/f/$folderId/file/$filename': typeof FFolderIdFileFilenameRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -94,6 +101,7 @@ export interface FileRoutesByTo {
   '/invite/$token': typeof InviteTokenRoute
   '/d/$docId/history': typeof DDocIdHistoryRoute
   '/d/$docId': typeof DDocIdIndexRoute
+  '/f/$folderId/file/$filename': typeof FFolderIdFileFilenameRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -107,6 +115,7 @@ export interface FileRoutesById {
   '/invite/$token': typeof InviteTokenRoute
   '/d/$docId/history': typeof DDocIdHistoryRoute
   '/d/$docId/': typeof DDocIdIndexRoute
+  '/f/$folderId_/file/$filename': typeof FFolderIdFileFilenameRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -121,6 +130,7 @@ export interface FileRouteTypes {
     | '/invite/$token'
     | '/d/$docId/history'
     | '/d/$docId/'
+    | '/f/$folderId/file/$filename'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -133,6 +143,7 @@ export interface FileRouteTypes {
     | '/invite/$token'
     | '/d/$docId/history'
     | '/d/$docId'
+    | '/f/$folderId/file/$filename'
   id:
     | '__root__'
     | '/'
@@ -145,6 +156,7 @@ export interface FileRouteTypes {
     | '/invite/$token'
     | '/d/$docId/history'
     | '/d/$docId/'
+    | '/f/$folderId_/file/$filename'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -158,6 +170,7 @@ export interface RootRouteChildren {
   InviteTokenRoute: typeof InviteTokenRoute
   DDocIdHistoryRoute: typeof DDocIdHistoryRoute
   DDocIdIndexRoute: typeof DDocIdIndexRoute
+  FFolderIdFileFilenameRoute: typeof FFolderIdFileFilenameRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -232,6 +245,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DDocIdHistoryRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/f/$folderId_/file/$filename': {
+      id: '/f/$folderId_/file/$filename'
+      path: '/f/$folderId/file/$filename'
+      fullPath: '/f/$folderId/file/$filename'
+      preLoaderRoute: typeof FFolderIdFileFilenameRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -246,6 +266,7 @@ const rootRouteChildren: RootRouteChildren = {
   InviteTokenRoute: InviteTokenRoute,
   DDocIdHistoryRoute: DDocIdHistoryRoute,
   DDocIdIndexRoute: DDocIdIndexRoute,
+  FFolderIdFileFilenameRoute: FFolderIdFileFilenameRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

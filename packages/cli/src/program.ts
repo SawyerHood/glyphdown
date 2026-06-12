@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { normalizeEol } from '@glyphdown/core'
+import { SHARE_LINK_ROLES, type ShareLinkRole } from '@glyphdown/protocol'
 import { Command, CommanderError } from 'commander'
 import pc from 'picocolors'
 import { type Api, createApi, pushWithBase } from './api.ts'
@@ -15,10 +16,10 @@ import {
 } from './assets.ts'
 import { type CliConfig, clearCredentials, loginWithDeviceCode, resolveConfig, writeConfig } from './config.ts'
 import { SKILL_MD } from './skill-content.gen.ts'
-import { parseDocRef } from './docref.ts'
+import { parseDocRef, parseShareToken } from './docref.ts'
 import { CliError, DEGENERATE_MESSAGE } from './errors.ts'
 import { clone, syncWorkspace } from './mirror.ts'
-import { type SyncAction, type SyncDocResult, pullFolder, pushAll, readFolderConfig, resolveVault, syncExitCode } from './sync.ts'
+import { type SyncAction, type SyncDocResult, pullFolder, pushAll, readFolderConfig, resolveFolder, resolveVault, syncExitCode } from './sync.ts'
 import { findWorkspace, listMetas, recordBase, rewriteMeta, slugify, workspaceRoot, writePull } from './workspace.ts'
 
 export { DEGENERATE_MESSAGE }
@@ -78,14 +79,13 @@ export function createProgram(deps: ProgramDeps = {}): Command {
 
   // -- assets helpers -----------------------------------------------------------
   // The asset scope for a workspace dir: its linked folder (folder.json)
-  // when present — uploads ride the first tracked doc, every folder doc shares
-  // the namespace — else the first tracked doc's own namespace (the server
+  // when present — else the first tracked doc's own namespace (the server
   // resolves folder-vs-doc scoping per doc).
   const assetOpsFor = (dir: string): AssetOps | null => {
     const folderConfig = readFolderConfig(dir)
     const metas = listMetas(dir).sort((a, b) => a.file.localeCompare(b.file))
     if (folderConfig) {
-      return folderAssetOps(apiFor(folderConfig.serverUrl), folderConfig.folderId, metas[0]?.docId ?? null)
+      return folderAssetOps(apiFor(folderConfig.serverUrl), folderConfig.folderId, folderConfig.serverUrl, metas[0]?.docId ?? null)
     }
     const meta = metas[0]
     if (meta) return docAssetOps(apiFor(meta.serverUrl), meta.docId)
@@ -361,7 +361,7 @@ export function createProgram(deps: ProgramDeps = {}): Command {
         // pull (the docs are already on disk).
         const assetResults = await pullAssets({
           dir: result.dir,
-          ops: folderAssetOps(api, result.folder.id, null),
+          ops: folderAssetOps(api, result.folder.id),
           err: errOut,
         })
         printAssetResults(assetResults.filter((r) => r.action !== 'up-to-date'))
@@ -416,7 +416,7 @@ export function createProgram(deps: ProgramDeps = {}): Command {
         if (opts.all) {
           const dir = resolve(cwd(), pathArg ?? '.')
           // Docs first; the asset pass runs even when some docs failed so a
-          // bad doc cannot strand image uploads.
+          // bad doc cannot strand asset uploads.
           let docError: unknown = null
           try {
             await pushAll({
@@ -675,6 +675,118 @@ export function createProgram(deps: ProgramDeps = {}): Command {
           out(p.kind === 'insert' ? pc.green(`  + "${quote}"`) : pc.red(`  - "${quote}"`))
         }
       }
+    })
+
+  // -- share ------------------------------------------------------------------
+  // Anyone-with-link share links (owner-only on the target). `glyphdown share
+  // <doc>` is the create shorthand (isDefault subcommand); folders/vaults go
+  // through --folder so a bare positional stays unambiguous as a doc id/URL.
+  type ShareTarget = { type: 'doc' | 'folder'; id: string }
+
+  // The shareable URL is the web landing page: /d/<docId> or /f/<folderId>.
+  const shareUrl = (target: ShareTarget, token: string): string =>
+    `${config().serverUrl.replace(/\/+$/, '')}/${target.type === 'doc' ? 'd' : 'f'}/${target.id}?share=${token}`
+
+  const shareTarget = async (doc: string | undefined, folderRef: string | undefined): Promise<ShareTarget> => {
+    if (doc !== undefined && folderRef !== undefined) {
+      throw new CliError(1, 'pass either a doc or --folder, not both')
+    }
+    if (folderRef !== undefined) {
+      return { type: 'folder', id: (await resolveFolder(apiFor(), folderRef)).id }
+    }
+    if (doc === undefined) {
+      throw new CliError(1, 'missing target — pass a doc id/URL, or --folder <folder> (see `glyphdown share --help`)')
+    }
+    return { type: 'doc', id: parseDocRef(doc) }
+  }
+
+  const parseShareRole = (value: string): ShareLinkRole => {
+    if ((SHARE_LINK_ROLES as readonly string[]).includes(value)) return value as ShareLinkRole
+    throw new CliError(1, `bad role "${value}" — a share link grants one of: ${SHARE_LINK_ROLES.join(', ')}`)
+  }
+
+  const share = program
+    .command('share')
+    .description('anyone-with-link share links, owner-only (bare `share <doc>` creates one; subcommands list/revoke)')
+
+  share
+    .command('create', { isDefault: true })
+    .description('create a share link and print its URL (the bare `glyphdown share <doc>` does the same)')
+    .argument('[doc]', 'doc id or URL (omit with --folder)')
+    .option('--folder <folderRef>', 'share a folder/vault instead (id or exact name) — the link covers its whole subtree')
+    .option('--role <role>', `role the link grants: ${SHARE_LINK_ROLES.join(' | ')}`, 'viewer')
+    .option('--json', 'machine-readable output')
+    .action(async (doc: string | undefined, opts: { folder?: string; role: string; json?: boolean }) => {
+      const role = parseShareRole(opts.role)
+      const target = await shareTarget(doc, opts.folder)
+      const api = apiFor()
+      const link =
+        target.type === 'doc'
+          ? await api.createDocShareLink(target.id, role)
+          : await api.createFolderShareLink(target.id, role)
+      const url = shareUrl(target, link.token)
+      if (opts.json) {
+        out(JSON.stringify({ target: target.type, id: target.id, token: link.token, role: link.role, createdAt: link.createdAt, url }, null, 2))
+        return
+      }
+      out(url)
+      const revokeRef = target.type === 'doc' ? target.id : `--folder ${target.id}`
+      out(pc.dim(`${link.role} link on ${target.type} ${target.id} — revoke with \`glyphdown share revoke ${revokeRef} ${link.token}\``))
+    })
+
+  share
+    .command('list')
+    .description('active share links for a doc or folder, with their URLs')
+    .argument('[doc]', 'doc id or URL (omit with --folder)')
+    .option('--folder <folderRef>', 'list a folder/vault instead (id or exact name)')
+    .option('--json', 'machine-readable output')
+    .action(async (doc: string | undefined, opts: { folder?: string; json?: boolean }) => {
+      const target = await shareTarget(doc, opts.folder)
+      const api = apiFor()
+      const links =
+        target.type === 'doc' ? await api.listDocShareLinks(target.id) : await api.listFolderShareLinks(target.id)
+      const rows = links.map((l) => ({ ...l, url: shareUrl(target, l.token) }))
+      if (opts.json) {
+        out(JSON.stringify(rows, null, 2))
+        return
+      }
+      if (rows.length === 0) {
+        out('no share links')
+        return
+      }
+      for (const l of rows) out(`${pc.dim(l.token)}  ${l.role.padEnd(9)}  ${l.url}`)
+    })
+
+  share
+    .command('revoke')
+    .description('revoke a share link by token (a URL already carrying ?share=<token> needs no separate token)')
+    .argument('[doc]', 'doc id or URL (with --folder: pass just the token)')
+    .argument('[token]', 'share-link token (from `share list`, or embedded in the URL as ?share=...)')
+    .option('--folder <folderRef>', 'revoke on a folder/vault instead (id or exact name)')
+    .option('--json', 'machine-readable output')
+    .action(async (doc: string | undefined, token: string | undefined, opts: { folder?: string; json?: boolean }) => {
+      let target: ShareTarget
+      let tok: string | undefined
+      if (opts.folder !== undefined) {
+        // With --folder the single positional IS the token.
+        if (token !== undefined) throw new CliError(1, 'with --folder pass just the token')
+        target = await shareTarget(undefined, opts.folder)
+        tok = doc
+      } else {
+        target = await shareTarget(doc, undefined)
+        tok = token ?? (doc !== undefined ? (parseShareToken(doc) ?? undefined) : undefined)
+      }
+      if (tok === undefined) {
+        throw new CliError(1, 'missing token — pass it after the target, or use a URL with ?share=<token>')
+      }
+      const api = apiFor()
+      if (target.type === 'doc') await api.revokeDocShareLink(target.id, tok)
+      else await api.revokeFolderShareLink(target.id, tok)
+      if (opts.json) {
+        out(JSON.stringify({ ok: true, target: target.type, id: target.id, token: tok }, null, 2))
+        return
+      }
+      out(`revoked share link ${tok} on ${target.type} ${target.id}`)
     })
 
   // -- snapshot ---------------------------------------------------------------

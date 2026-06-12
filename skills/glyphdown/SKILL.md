@@ -1,6 +1,6 @@
 ---
 name: glyphdown
-description: Collaborate on Glyphdown docs (Google Docs for markdown) via the glyphdown CLI. Use when users ask to edit my glyphdown docs, sync my markdown notes, pull my notes, push this writeup, leave suggestions on the doc, comment on a doc, clone my glyphdown workspace, or any markdown collaboration with glyphdown.com docs. Trigger phrases include "glyphdown", "sync my notes", "pull the doc", "push my edits", "suggest changes on the doc", "check comments on the doc".
+description: Collaborate on Glyphdown docs (Google Docs for markdown) via the glyphdown CLI. Use when users ask to edit my glyphdown docs, sync my markdown notes, pull my notes, push this writeup, leave suggestions on the doc, comment on a doc, share a doc with a public link, clone my glyphdown workspace, or any markdown collaboration with glyphdown.com docs. Trigger phrases include "glyphdown", "sync my notes", "pull the doc", "push my edits", "suggest changes on the doc", "check comments on the doc", "share the doc", "make a public link".
 ---
 
 # Glyphdown
@@ -17,7 +17,7 @@ Full reference: [docs/agent-guide.md](https://github.com/SawyerHood/glyphdown/bl
 
 ```sh
 glyphdown clone work && cd work   # once; mirrors every folder/doc you can access (default dir: ./glyphdown)
-# ... edit .md files, add images, mkdir new folders — normal tools ...
+# ... edit .md files, add images/HTML assets, mkdir new folders — normal tools ...
 glyphdown sync                    # two-way reconcile, run before AND after editing
 ```
 
@@ -48,9 +48,22 @@ glyphdown comment <doc> --reply <id> --body "..."     # reply
 glyphdown comment <doc> --resolve <id> [--body "..."] # resolve (reply first if --body)
 ```
 
+## Share links (anyone-with-link)
+
+Owner-only. `<doc>` is an id or URL; folders/vaults use `--folder <id|name>` instead (the link covers the whole subtree, URL `/f/<folderId>?share=<token>`).
+
+```sh
+glyphdown share <doc> [--role viewer|commenter|suggester|editor] [--json]  # create (default viewer); prints https://…/d/<docId>?share=<token>
+glyphdown share list <doc> [--json]                   # active links: token, role, url
+glyphdown share revoke <doc> <token>                  # revoke (a ?share= URL alone also works)
+glyphdown share [list|revoke] --folder <ref> …        # folder/vault variants
+```
+
+The token IS the capability — treat share URLs as secrets.
+
 ## Rules
 
-- `--json` on read commands (`list`, `vaults`, `cat`, `comments`, `suggestions`, `new`, `sync`) for parsing.
+- `--json` on read commands (`list`, `vaults`, `cat`, `comments`, `suggestions`, `new`, `sync`, `share`) for parsing.
 - Filenames are canonical slugs (`[a-z0-9-]` + `.md`); the file name IS the doc name everywhere. The `# heading` is just content.
 - Don't rewrite >60% of a shared doc in one push (the server refuses with exit 3). `glyphdown snapshot <doc> -m "msg"` before big changes.
 - Deletions never propagate: deleted local files re-pull; server-deleted docs warn (`remote gone`) and stay local. Delete via the web UI.

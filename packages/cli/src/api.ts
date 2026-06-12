@@ -8,6 +8,8 @@ import type {
   Principal,
   PushRequest,
   PushResponse,
+  ShareLink,
+  ShareLinkRole,
   SuggestionRecord,
   UploadAssetResponse,
   VaultMeta,
@@ -34,7 +36,7 @@ export interface ContentResult {
   baseHash: string | null
 }
 
-/** Raw asset bytes — binary, NEVER EOL-normalized (images are not text). */
+/** Raw asset bytes — binary, NEVER EOL-normalized. */
 export interface AssetDownload {
   data: Uint8Array
   /** Unquoted etag from the response header, when sent. */
@@ -88,6 +90,16 @@ export interface Api {
   resolveComment(docId: string, commentId: string, resolved?: boolean): Promise<void>
   listSuggestions(docId: string): Promise<SuggestionRecord[]>
   createVersion(docId: string, name: string): Promise<VersionMeta>
+  /**
+   * Share links (anyone-with-link grants) — owner-only on the target; the
+   * server 403s otherwise. A folder link covers the folder's entire subtree.
+   */
+  listDocShareLinks(docId: string): Promise<ShareLink[]>
+  createDocShareLink(docId: string, role: ShareLinkRole): Promise<ShareLink>
+  revokeDocShareLink(docId: string, token: string): Promise<void>
+  listFolderShareLinks(folderId: string): Promise<ShareLink[]>
+  createFolderShareLink(folderId: string, role: ShareLinkRole): Promise<ShareLink>
+  revokeFolderShareLink(folderId: string, token: string): Promise<void>
   /** Asset surface: doc routes resolve the namespace (folder or doc) server-side. */
   listDocAssets(docId: string): Promise<AssetMeta[]>
   listFolderAssets(folderId: string): Promise<AssetMeta[]>
@@ -95,6 +107,13 @@ export interface Api {
   downloadFolderAsset(folderId: string, filename: string): Promise<AssetDownload>
   uploadDocAsset(
     docId: string,
+    filename: string,
+    data: Uint8Array,
+    contentType: string,
+    overwrite?: boolean,
+  ): Promise<UploadAssetResponse>
+  uploadFolderAsset(
+    folderId: string,
     filename: string,
     data: Uint8Array,
     contentType: string,
@@ -277,6 +296,44 @@ export function createApi(opts: ApiOptions): Api {
       return requestJson<VersionMeta>('POST', `/api/docs/${encodeURIComponent(docId)}/versions`, { name })
     },
 
+    async listDocShareLinks(docId) {
+      const { shareLinks } = await requestJson<{ shareLinks: ShareLink[] }>(
+        'GET',
+        `/api/docs/${encodeURIComponent(docId)}/share-links`,
+      )
+      return shareLinks
+    },
+
+    createDocShareLink(docId, role) {
+      return requestJson<ShareLink>('POST', `/api/docs/${encodeURIComponent(docId)}/share-links`, { role })
+    },
+
+    async revokeDocShareLink(docId, token) {
+      await requestJson<unknown>(
+        'DELETE',
+        `/api/docs/${encodeURIComponent(docId)}/share-links/${encodeURIComponent(token)}`,
+      )
+    },
+
+    async listFolderShareLinks(folderId) {
+      const { shareLinks } = await requestJson<{ shareLinks: ShareLink[] }>(
+        'GET',
+        `/api/folders/${encodeURIComponent(folderId)}/share-links`,
+      )
+      return shareLinks
+    },
+
+    createFolderShareLink(folderId, role) {
+      return requestJson<ShareLink>('POST', `/api/folders/${encodeURIComponent(folderId)}/share-links`, { role })
+    },
+
+    async revokeFolderShareLink(folderId, token) {
+      await requestJson<unknown>(
+        'DELETE',
+        `/api/folders/${encodeURIComponent(folderId)}/share-links/${encodeURIComponent(token)}`,
+      )
+    },
+
     async listDocAssets(docId) {
       const { assets } = await requestJson<{ assets: AssetMeta[] }>(
         'GET',
@@ -301,23 +358,37 @@ export function createApi(opts: ApiOptions): Api {
       return downloadBinary(`/api/folders/${encodeURIComponent(folderId)}/assets/${encodeURIComponent(filename)}`)
     },
 
-    async uploadDocAsset(docId, filename, data, contentType, overwrite = false) {
-      const params = new URLSearchParams({ filename })
-      if (overwrite) params.set('overwrite', 'true')
-      const headers: Record<string, string> = { 'content-type': contentType }
-      if (credential) headers.authorization = `Bearer ${credential}`
-      const res = await fetchFn(
-        `${base}/api/docs/${encodeURIComponent(docId)}/assets?${params.toString()}`,
-        // Binary body straight through — no JSON wrapping, no EOL touching.
-        { method: 'POST', headers, body: data as unknown as RequestInit['body'] },
-      )
-      const text = await res.text()
-      if (!res.ok) throw mapError(res.status, text, res.headers.get('retry-after'))
-      return JSON.parse(text) as UploadAssetResponse
+    uploadDocAsset(docId, filename, data, contentType, overwrite = false) {
+      return uploadAsset(`/api/docs/${encodeURIComponent(docId)}/assets`, filename, data, contentType, overwrite)
+    },
+
+    uploadFolderAsset(folderId, filename, data, contentType, overwrite = false) {
+      return uploadAsset(`/api/folders/${encodeURIComponent(folderId)}/assets`, filename, data, contentType, overwrite)
     },
   }
 
-  /** GET binary content via ArrayBuffer — images must never be EOL-normalized. */
+  async function uploadAsset(
+    path: string,
+    filename: string,
+    data: Uint8Array,
+    contentType: string,
+    overwrite: boolean,
+  ): Promise<UploadAssetResponse> {
+    const params = new URLSearchParams({ filename })
+    if (overwrite) params.set('overwrite', 'true')
+    const headers: Record<string, string> = { 'content-type': contentType }
+    if (credential) headers.authorization = `Bearer ${credential}`
+    const res = await fetchFn(
+      `${base}${path}?${params.toString()}`,
+      // Binary body straight through — no JSON wrapping, no EOL touching.
+      { method: 'POST', headers, body: data as unknown as RequestInit['body'] },
+    )
+    const text = await res.text()
+    if (!res.ok) throw mapError(res.status, text, res.headers.get('retry-after'))
+    return JSON.parse(text) as UploadAssetResponse
+  }
+
+  /** GET binary content via ArrayBuffer — assets must never be EOL-normalized. */
   async function downloadBinary(path: string): Promise<AssetDownload> {
     const res = await send('GET', path)
     if (!res.ok) throw mapError(res.status, await res.text(), res.headers.get('retry-after'))

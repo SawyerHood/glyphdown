@@ -1,9 +1,9 @@
-import { useEffect, useState, type DragEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type DragEvent, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
-import { useQuery } from '@tanstack/react-query'
-import { Clock3, FilePlus2, FileText, Folder, FolderPlus, Image as ImageIcon, Pencil, Trash2 } from 'lucide-react'
-import { MAX_FOLDER_DEPTH, type AssetMeta, type DocMeta } from '@glyphdown/protocol'
-import { listDocs, listFolderAssets, listFolders, type FolderInfo } from '../../lib/api.ts'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Clock3, FileCode2, FilePlus2, FileText, Folder, FolderPlus, Image as ImageIcon, Pencil, Trash2, Upload } from 'lucide-react'
+import { assetKindForContentType, MAX_FOLDER_DEPTH, roleAtLeast, type AssetMeta, type DocMeta } from '@glyphdown/protocol'
+import { ApiError, listDocs, listFolderAssets, listFolders, uploadFolderAsset, type FolderInfo } from '../../lib/api.ts'
 import { breadcrumbChain, folderListing, recentDocs } from '../../lib/browse.ts'
 import { docVaultId } from '../../lib/vaults.ts'
 import { folderWithDescendants, sortAssets } from '../../lib/fileTree.ts'
@@ -68,11 +68,13 @@ interface BrowseCtx {
 }
 
 export default function FileBrowser({ folderId }: { folderId: string | null }) {
+  const queryClient = useQueryClient()
   const docsQuery = useQuery({ queryKey: ['docs'], queryFn: listDocs })
   const foldersQuery = useQuery({ queryKey: ['folders'], queryFn: listFolders })
 
   const { toast, showToast } = useTransientToast()
   const mutations = useFileMutations(showToast)
+  const htmlUploadInputRef = useRef<HTMLInputElement>(null)
 
   const [creating, setCreating] = useState<Creating | null>(null)
   const [renaming, setRenaming] = useState<Renaming | null>(null)
@@ -105,11 +107,39 @@ export default function FileBrowser({ folderId }: { folderId: string | null }) {
     staleTime: 30_000,
   })
   const assets = currentFolder === null ? [] : sortAssets(assetsQuery.data ?? [])
+  const visibleAssets = assets.filter((asset) => assetKindForContentType(asset.contentType) !== null)
+
+  const uploadHtmlMut = useMutation({
+    mutationFn: async (input: { folderId: string; files: File[] }) => {
+      const uploaded = []
+      for (const file of input.files) {
+        const blob = file.type === 'text/html' ? file : file.slice(0, file.size, 'text/html')
+        uploaded.push(await uploadFolderAsset(input.folderId, file.name || 'page.html', blob))
+      }
+      return uploaded
+    },
+    onSuccess: (uploaded, input) => {
+      void queryClient.invalidateQueries({ queryKey: ['folder-assets', input.folderId] })
+      showToast(uploaded.length === 1 ? `Uploaded ${uploaded[0]!.asset.filename}.` : `Uploaded ${uploaded.length} HTML files.`)
+    },
+    onError: (err) => showToast(htmlUploadErrorMessage(err)),
+  })
 
   // Create gates mirror the tree: root is always yours; folders owner-only.
   // chain.length is the current folder's depth, so a child sits at +1.
   const isOwnerHere = currentFolder === null || currentFolder.role === 'owner'
   const canCreateFolder = isOwnerHere && chain.length + 1 <= MAX_FOLDER_DEPTH
+  const canUploadHtml = currentFolder !== null && roleAtLeast(currentFolder.role, 'editor')
+
+  const uploadHtmlFiles = (files: FileList | null) => {
+    if (currentFolder === null || !files) return
+    const htmlFiles = [...files].filter(isHtmlFile)
+    if (htmlFiles.length === 0) {
+      showToast('Choose a .html or .htm file.')
+      return
+    }
+    uploadHtmlMut.mutate({ folderId: currentFolder.id, files: htmlFiles })
+  }
 
   const hasDocDrag = (e: DragEvent) => e.dataTransfer.types.includes(DOC_DRAG_MIME)
   const hasFolderDrag = (e: DragEvent) => e.dataTransfer.types.includes(FOLDER_DRAG_MIME)
@@ -162,7 +192,7 @@ export default function FileBrowser({ folderId }: { folderId: string | null }) {
     hasFolderDrag,
   }
 
-  const isEmpty = listing.folders.length === 0 && listing.docs.length === 0 && assets.length === 0
+  const isEmpty = listing.folders.length === 0 && listing.docs.length === 0 && visibleAssets.length === 0
 
   return (
     <main className="page-wrap py-8">
@@ -189,6 +219,24 @@ export default function FileBrowser({ folderId }: { folderId: string | null }) {
               >
                 <FolderPlus size={14} /> New folder
               </Button>
+            ) : null}
+            {canUploadHtml ? (
+              <>
+                <input
+                  ref={htmlUploadInputRef}
+                  type="file"
+                  accept=".html,.htm,text/html"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    uploadHtmlFiles(e.currentTarget.files)
+                    e.currentTarget.value = ''
+                  }}
+                />
+                <Button onClick={() => htmlUploadInputRef.current?.click()} disabled={uploadHtmlMut.isPending}>
+                  <Upload size={14} /> {uploadHtmlMut.isPending ? 'Uploading...' : 'Upload HTML'}
+                </Button>
+              </>
             ) : null}
             {isOwnerHere ? (
               <Button
@@ -278,9 +326,9 @@ export default function FileBrowser({ folderId }: { folderId: string | null }) {
             <DocRow key={doc.id} doc={doc} ctx={ctx} />
           ))}
 
-          {assets.map((asset) => (
-            <AssetRow key={asset.id} asset={asset} ctx={ctx} />
-          ))}
+          {currentFolder
+            ? visibleAssets.map((asset) => <AssetRow key={asset.id} folderId={currentFolder.id} asset={asset} ctx={ctx} />)
+            : null}
         </ul>
       )}
 
@@ -457,8 +505,27 @@ function DocRow({ doc, ctx }: { doc: DocMeta; ctx: BrowseCtx }) {
   )
 }
 
-/** Image asset row — opens the shared lightbox viewer (download/delete live there). */
-function AssetRow({ asset, ctx }: { asset: AssetMeta; ctx: BrowseCtx }) {
+/** Folder asset row — images open the lightbox; standalone HTML opens the sandboxed viewer. */
+function AssetRow({ folderId, asset, ctx }: { folderId: string; asset: AssetMeta; ctx: BrowseCtx }) {
+  const kind = assetKindForContentType(asset.contentType)
+  if (kind === 'html') {
+    return (
+      <li className={`${ROW_CLASS} hover:bg-[var(--paper-soft)]`}>
+        <Link
+          to="/f/$folderId/file/$filename"
+          params={{ folderId, filename: asset.filename }}
+          title={asset.filename}
+          className="flex min-w-0 flex-1 items-center gap-3 py-2.5 text-sm font-medium text-[var(--ink)] no-underline hover:text-[var(--accent)]"
+        >
+          <FileCode2 size={16} className="shrink-0 text-[var(--ink-faint)]" />
+          <span className="truncate">{asset.filename}</span>
+        </Link>
+        <UpdatedCell />
+      </li>
+    )
+  }
+
+  if (kind !== 'image') return null
   return (
     <li className={`${ROW_CLASS} hover:bg-[var(--paper-soft)]`}>
       <button
@@ -473,6 +540,20 @@ function AssetRow({ asset, ctx }: { asset: AssetMeta; ctx: BrowseCtx }) {
       <UpdatedCell />
     </li>
   )
+}
+
+function isHtmlFile(file: File): boolean {
+  const name = file.name.toLowerCase()
+  return file.type === 'text/html' || name.endsWith('.html') || name.endsWith('.htm')
+}
+
+function htmlUploadErrorMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.code === 'too-large') return 'HTML files must be 10 MB or smaller.'
+    if (err.code === 'forbidden') return 'You need editor access to upload HTML here.'
+    if (err.code === 'unsupported-content-type') return 'Choose a .html or .htm file.'
+  }
+  return 'Could not upload the HTML file.'
 }
 
 /** Inline create row (the tree's pattern, browser-sized): commit on Enter/blur, Esc cancels. */

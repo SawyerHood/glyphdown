@@ -101,6 +101,34 @@ describe('glyphdown clone', () => {
     expect(new Uint8Array(readFileSync(join(dir, 'work', 'specs', 'diagram.png')))).toEqual(bytes)
   })
 
+  it('round-trips a folder HTML asset through clone and sync', async () => {
+    const state = server({ folders: [folder('f1', 'Specs')] })
+    state.docs.set('d1', serverDoc('d1', 'Doc', 'see dashboard\n', 'f1'))
+    const first = new TextEncoder().encode('<!doctype html><p>v1</p>')
+    state.assets.set('dashboard.html', serverAsset('dashboard.html', first, 'text/html'))
+
+    const dir = tmp()
+    const h = harness(dir, state)
+    await h.run(['clone', 'work'])
+    const file = join(dir, 'work', 'specs', 'dashboard.html')
+    expect(readFileSync(file, 'utf8')).toBe('<!doctype html><p>v1</p>')
+
+    h.lines.length = 0
+    const edited = '<!doctype html><p>v2</p>'
+    writeFileSync(file, edited)
+    await h.run(['sync', join(dir, 'work')])
+
+    expect(new TextDecoder().decode(state.assets.get('dashboard.html')!.data)).toBe(edited)
+    expect(state.assetUploads.at(-1)).toMatchObject({
+      scope: 'folder',
+      id: 'f1',
+      filename: 'dashboard.html',
+      overwrite: true,
+    })
+    const line = h.lines.find((l) => l.includes('asset specs/dashboard.html') && l.includes('pushed'))
+    expect(line).toContain(`${SERVER}/f/f1/file/dashboard.html`)
+  })
+
   it('refuses to re-clone into an existing workspace, pointing at sync', async () => {
     const state = nestedAccount()
     const dir = tmp()
@@ -207,6 +235,28 @@ describe('glyphdown sync (mirror workspace)', () => {
     expect(readFolderConfig(join(root, 'team', 'archive'))?.folderId).toBe(archive.id)
   })
 
+  it('creates a server folder for a new local directory containing only HTML', async () => {
+    const state = nestedAccount()
+    const { root, h } = await cloned(state)
+
+    mkdirSync(join(root, 'team', 'html-only'), { recursive: true })
+    writeFileSync(join(root, 'team', 'html-only', 'index.html'), '<!doctype html><p>hello</p>')
+
+    await h.run(['sync', root])
+
+    const created = state.folders.find((f) => f.name === 'html-only')!
+    expect(created.parentId).toBe('f-team')
+    expect(state.assets.get('index.html')?.contentType).toBe('text/html')
+    expect(state.assetUploads.at(-1)).toMatchObject({
+      scope: 'folder',
+      id: created.id,
+      filename: 'index.html',
+      overwrite: false,
+    })
+    const line = h.lines.find((l) => l.includes('asset team/html-only/index.html') && l.includes('pushed'))
+    expect(line).toContain(`${SERVER}/f/${created.id}/file/index.html`)
+  })
+
   it('materializes new server folders and their docs as nested local dirs', async () => {
     const state = nestedAccount()
     const { root, h } = await cloned(state)
@@ -274,14 +324,14 @@ describe('glyphdown sync (mirror workspace)', () => {
     expect(budget.meta.folderId).toBe('f-team')
   })
 
-  it('notes ignored non-markdown, non-image files once', async () => {
+  it('notes ignored non-markdown, non-asset files once', async () => {
     const state = nestedAccount()
     const { root, h } = await cloned(state)
     writeFileSync(join(root, 'team', 'data.csv'), 'a,b\n')
     writeFileSync(join(root, 'script.py'), 'print(1)\n')
 
     await h.run(['sync', root])
-    expect(h.errors.join('\n')).toContain('ignored 2 non-markdown, non-image file(s)')
+    expect(h.errors.join('\n')).toContain('ignored 2 non-markdown, non-asset file(s)')
   })
 })
 

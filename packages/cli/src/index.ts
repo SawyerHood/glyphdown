@@ -13,6 +13,7 @@ export {
 export type { CliConfig, DeviceLoginIO } from './config.ts'
 export {
   assetStatePath,
+  assetContentType,
   decideAssetSync,
   docAssetOps,
   folderAssetOps,
@@ -35,7 +36,7 @@ export type {
   PullAssetsOptions,
   SyncAssetsOptions,
 } from './assets.ts'
-export { parseDocRef } from './docref.ts'
+export { parseDocRef, parseShareToken } from './docref.ts'
 export { CliError, DEGENERATE_MESSAGE } from './errors.ts'
 export {
   allocateDirName,

@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import {
-  IMAGE_FILE_EXTENSIONS,
   MAX_ASSET_BYTES,
+  SYNCABLE_ASSET_FILE_EXTENSIONS,
+  assetKindForContentType,
   normalizeAssetFilename,
   type AssetMeta,
 } from '@glyphdown/protocol'
@@ -12,8 +13,8 @@ import { workspaceRoot } from './workspace.ts'
 
 /**
  * Folder/doc asset sync for the CLI (images referenced by markdown-relative
- * paths). Bytes are binary end to end — read/written with Buffers, fetched
- * via ArrayBuffer, NEVER EOL-normalized.
+ * paths and standalone HTML files). Bytes are binary end to end — read/written
+ * with Buffers, fetched via ArrayBuffer, NEVER EOL-normalized.
  *
  * State lives in `.glyphdown/assets.json` — or a legacy `.ink/` workspace
  * root — ({filename: {etag, size, mtimeMs}}):
@@ -58,7 +59,7 @@ export function writeAssetState(dir: string, state: AssetStateFile): void {
 // Local scan
 // ---------------------------------------------------------------------------
 
-const IMAGE_EXTENSION_SET = new Set<string>(IMAGE_FILE_EXTENSIONS)
+const SYNCABLE_ASSET_EXTENSION_SET = new Set<string>(SYNCABLE_ASSET_FILE_EXTENSIONS)
 
 const CONTENT_TYPE_BY_EXTENSION: Record<string, string> = {
   png: 'image/png',
@@ -68,12 +69,16 @@ const CONTENT_TYPE_BY_EXTENSION: Record<string, string> = {
   webp: 'image/webp',
   svg: 'image/svg+xml',
   avif: 'image/avif',
+  html: 'text/html',
+  htm: 'text/html',
 }
 
-export function imageContentType(filename: string): string {
+export function assetContentType(filename: string): string {
   const ext = filename.slice(filename.lastIndexOf('.') + 1).toLowerCase()
   return CONTENT_TYPE_BY_EXTENSION[ext] ?? 'image/png'
 }
+
+export const imageContentType = assetContentType
 
 export interface LocalAsset {
   /** Actual on-disk path (the name may differ from the normalized key). */
@@ -83,8 +88,8 @@ export interface LocalAsset {
 }
 
 /**
- * Image files (by extension, ≤ 10 MB) in the top level of the workspace dir,
- * keyed by their server-normalized filename. Dotfiles (including the
+ * Syncable asset files (by extension, ≤ 10 MB) in the top level of the
+ * workspace dir, keyed by their server-normalized filename. Dotfiles (including the
  * bookkeeping dir) are skipped.
  */
 export function scanLocalAssets(dir: string, warn: (line: string) => void = () => {}): Map<string, LocalAsset> {
@@ -93,7 +98,7 @@ export function scanLocalAssets(dir: string, warn: (line: string) => void = () =
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (!entry.isFile() || entry.name.startsWith('.')) continue
     const ext = entry.name.slice(entry.name.lastIndexOf('.') + 1).toLowerCase()
-    if (!IMAGE_EXTENSION_SET.has(ext)) continue
+    if (!SYNCABLE_ASSET_EXTENSION_SET.has(ext)) continue
     const key = normalizeAssetFilename(entry.name)
     if (key === null) continue
     const path = join(dir, entry.name)
@@ -123,7 +128,7 @@ export function md5Hex(data: Uint8Array): string {
 export type AssetDecision =
   | { action: 'upload'; overwrite: boolean }
   | { action: 'download' }
-  /** Both sides changed: local wins with a warning — images don't merge. */
+  /** Both sides changed: local wins with a warning — assets don't merge. */
   | { action: 'conflict-local-kept' }
   | { action: 'up-to-date' }
   /** Stale state entry — the asset is gone on both sides. */
@@ -152,7 +157,7 @@ export function decideAssetSync(input: {
 
   if (recorded === null) {
     // Both exist but were never synced. Identical bytes just start tracking;
-    // different bytes are a conflict (local wins, images don't merge).
+    // different bytes are a conflict (local wins, assets don't merge).
     return bytesIdentical ? { action: 'up-to-date' } : { action: 'conflict-local-kept' }
   }
 
@@ -174,10 +179,10 @@ export function decideAssetSync(input: {
 export interface AssetOps {
   list(): Promise<AssetMeta[]>
   download(filename: string): Promise<AssetDownload>
-  /** Null when the scope has no doc to upload through (folder with no docs). */
   upload:
     | ((filename: string, data: Uint8Array, contentType: string, overwrite: boolean) => Promise<AssetMeta>)
     | null
+  viewerUrl?: (filename: string) => string
 }
 
 export function docAssetOps(api: Api, docId: string): AssetOps {
@@ -189,17 +194,30 @@ export function docAssetOps(api: Api, docId: string): AssetOps {
   }
 }
 
-export function folderAssetOps(api: Api, folderId: string, uploadDocId: string | null): AssetOps {
+export function folderAssetOps(
+  api: Api,
+  folderId: string,
+  serverUrl?: string,
+  legacyUploadDocId?: string | null,
+): AssetOps {
   return {
     list: () => api.listFolderAssets(folderId),
     download: (filename) => api.downloadFolderAsset(folderId, filename),
-    // Uploads are doc-scoped (per-doc roles); any doc in the folder shares
-    // the folder namespace, so the first tracked doc carries them.
-    upload:
-      uploadDocId === null
-        ? null
-        : async (filename, data, contentType, overwrite) =>
-            (await api.uploadDocAsset(uploadDocId, filename, data, contentType, overwrite)).asset,
+    upload: async (filename, data, contentType, overwrite) => {
+      try {
+        return (await api.uploadFolderAsset(folderId, filename, data, contentType, overwrite)).asset
+      } catch (error) {
+        if (!isLegacyFolderUploadMiss(error)) throw error
+        if (assetKindForContentType(contentType) !== 'image') {
+          throw new Error('server does not support folder HTML asset uploads — upgrade the server to sync .html/.htm files')
+        }
+        if (legacyUploadDocId === undefined || legacyUploadDocId === null) {
+          throw new Error('no doc in this folder to upload through — pull a doc first')
+        }
+        return (await api.uploadDocAsset(legacyUploadDocId, filename, data, contentType, overwrite)).asset
+      }
+    },
+    ...(serverUrl !== undefined ? { viewerUrl: (filename) => fileViewerUrl(serverUrl, folderId, filename) } : {}),
   }
 }
 
@@ -271,7 +289,7 @@ export interface SyncAssetsOptions {
 }
 
 /**
- * Reconcile the workspace dir's image files with the scope's assets:
+ * Reconcile the workspace dir's syncable files with the scope's assets:
  * new-local/changed-local push (overwrite for changed), new-remote/
  * changed-remote pull (two-way mode only), both-changed keeps local with a
  * warning. Bookkeeping in the workspace root's assets.json.
@@ -358,20 +376,24 @@ async function applyDecision(
     case 'conflict-local-kept': {
       const overwrite = decision.action === 'conflict-local-kept' || decision.overwrite
       if (decision.action === 'conflict-local-kept') {
-        opts.err(`warning: asset ${name} changed both locally and on the server — keeping local (images don't merge)`)
+        opts.err(`warning: asset ${name} changed both locally and on the server — keeping local (assets don't merge)`)
       }
       if (!localFile) return { filename: name, action: 'failed', message: 'local file vanished mid-sync' }
       if (opts.ops.upload === null) {
-        return { filename: name, action: 'failed', message: 'no doc in this folder to upload through — pull a doc first' }
+        return { filename: name, action: 'failed', message: 'asset uploads are unavailable for this scope' }
       }
       const data = new Uint8Array(readFileSync(localFile.path))
-      const uploaded = await opts.ops.upload(basename(localFile.path), data, imageContentType(name), overwrite)
+      const uploaded = await opts.ops.upload(basename(localFile.path), data, assetContentType(name), overwrite)
       // Record under the server's name (normally === name; collisions rename).
       state[uploaded.filename] = { etag: uploaded.etag, size: localFile.size, mtimeMs: localFile.mtimeMs }
+      const messageParts = [
+        uploaded.filename !== name ? `stored as ${uploaded.filename}` : '',
+        assetKindForContentType(uploaded.contentType) === 'html' ? opts.ops.viewerUrl?.(uploaded.filename) ?? '' : '',
+      ].filter(Boolean)
       return {
         filename: name,
         action: decision.action === 'conflict-local-kept' ? 'conflict-local-kept' : 'pushed',
-        ...(uploaded.filename !== name ? { message: `stored as ${uploaded.filename}` } : {}),
+        ...(messageParts.length > 0 ? { message: messageParts.join(' — ') } : {}),
       }
     }
 
@@ -394,4 +416,13 @@ async function applyDecision(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function fileViewerUrl(serverUrl: string, folderId: string, filename: string): string {
+  return `${serverUrl.replace(/\/+$/, '')}/f/${folderId}/file/${encodeURIComponent(filename)}`
+}
+
+function isLegacyFolderUploadMiss(error: unknown): boolean {
+  const status = typeof error === 'object' && error !== null ? (error as { status?: unknown }).status : undefined
+  return status === 404 || status === 405
 }

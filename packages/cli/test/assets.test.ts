@@ -178,7 +178,8 @@ function fetchFor(state: AssetServer): typeof fetch {
           stored = `${filename.slice(0, dot)}-${i}${filename.slice(dot)}`
         }
       }
-      const asset: ServerAsset = { data, etag: md5Hex(data), contentType: 'image/png' }
+      const contentType = (init?.headers as Record<string, string>)['content-type'] ?? 'image/png'
+      const asset: ServerAsset = { data, etag: md5Hex(data), contentType }
       state.assets.set(stored, asset)
       state.uploads.push({ filename: stored, overwrite })
       return new Response(JSON.stringify({ asset: metaOf(stored, asset), path: stored }), {
@@ -285,7 +286,18 @@ describe('syncAssets (two-way, mocked fetch)', () => {
     expect(readAssetState(dir)['pic.png']).toMatchObject({ etag: md5Hex(BYTES_A) })
   })
 
-  it('skips non-image and oversized files', async () => {
+  it('syncs HTML files with text/html content type', async () => {
+    const dir = tmp()
+    const html = new TextEncoder().encode('<!doctype html><p>Hi</p>')
+    writeFileSync(join(dir, 'page.html'), html)
+    const server = assetServer()
+    const results = await syncAssets({ dir, ops: opsFor(server), mode: 'two-way', err: noop })
+    expect(results).toEqual([{ filename: 'page.html', action: 'pushed' }])
+    expect(server.assets.get('page.html')).toMatchObject({ contentType: 'text/html' })
+    expect(server.assets.get('page.html')!.data).toEqual(html)
+  })
+
+  it('skips non-syncable and oversized files', async () => {
     const dir = tmp()
     writeFileSync(join(dir, 'notes.md'), '# hi')
     writeFileSync(join(dir, 'data.bin'), BYTES_A)

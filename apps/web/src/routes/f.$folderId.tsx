@@ -1,9 +1,10 @@
 import { Link, createFileRoute } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { ChevronRight, FileText, Folder, FolderRoot, FolderX, PenLine } from 'lucide-react'
-import type { DocMeta, FolderMeta } from '@glyphdown/protocol'
+import { ChevronRight, FileCode2, FileText, Folder, FolderRoot, FolderX, PenLine } from 'lucide-react'
+import { assetKindForContentType, type DocMeta, type FolderListingFolderMeta, type FolderMeta } from '@glyphdown/protocol'
 import { ApiError, fetchMe, getFolderListing } from '../lib/api.ts'
 import { breadcrumbChain, folderListing } from '../lib/browse.ts'
+import { sortAssets } from '../lib/fileTree.ts'
 import { timeAgo } from '../lib/presence.ts'
 import { Spinner } from '../components/ui.tsx'
 
@@ -125,22 +126,23 @@ const ROLE_VERB: Record<string, string> = {
  * above it are invisible by design), then subfolders and docs of the current
  * level, FileBrowser-styled but read-only.
  */
-function SubtreeBrowser({
+export function SubtreeBrowser({
   root,
   current,
   all,
   docs,
   share,
 }: {
-  root: FolderMeta
-  current: FolderMeta
-  all: FolderMeta[]
+  root: FolderListingFolderMeta
+  current: FolderListingFolderMeta
+  all: FolderListingFolderMeta[]
   docs: DocMeta[]
   share: string | undefined
 }) {
   const chain = breadcrumbChain(all, current.id)
   const listing = folderListing(docs, all, current.id) ?? { folders: [], docs: [] }
   const docSearch = share !== undefined ? { share } : {}
+  const htmlAssets = sortAssets(current.assets.filter((asset) => assetKindForContentType(asset.contentType) === 'html'))
 
   return (
     <>
@@ -168,7 +170,7 @@ function SubtreeBrowser({
         ))}
       </div>
 
-      {listing.folders.length === 0 && listing.docs.length === 0 ? (
+      {listing.folders.length === 0 && listing.docs.length === 0 && htmlAssets.length === 0 ? (
         <div className="rounded-lg border border-dashed border-[var(--line)] px-4 py-10 text-center">
           <p className="m-0 text-sm font-medium text-[var(--ink-soft)]">
             {current.kind === 'vault' ? 'This vault is empty.' : 'This folder is empty.'}
@@ -205,6 +207,20 @@ function SubtreeBrowser({
               <span className="hidden w-20 shrink-0 whitespace-nowrap text-right text-xs text-[var(--ink-faint)] sm:inline">
                 {timeAgo(doc.updatedAt)}
               </span>
+            </li>
+          ))}
+          {htmlAssets.map((asset) => (
+            <li key={asset.id} className={`${ROW_CLASS} hover:bg-[var(--paper-soft)]`}>
+              <Link
+                to="/f/$folderId/file/$filename"
+                params={{ folderId: current.id, filename: asset.filename }}
+                search={docSearch}
+                title={asset.filename}
+                className="flex min-w-0 flex-1 items-center gap-3 py-2.5 text-sm font-medium text-[var(--ink)] no-underline hover:text-[var(--accent)]"
+              >
+                <FileCode2 size={16} className="shrink-0 text-[var(--ink-faint)]" />
+                <span className="truncate">{asset.filename}</span>
+              </Link>
             </li>
           ))}
         </ul>

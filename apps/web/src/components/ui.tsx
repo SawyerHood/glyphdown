@@ -167,7 +167,12 @@ export function Dialog({
         ref={ref}
         role="dialog"
         aria-modal="true"
-        className={`${panelClassName ?? `w-full ${wide ? 'max-w-2xl' : 'max-w-md'}`} rounded-xl border border-[var(--line)] bg-[var(--paper)] shadow-xl`}
+        // max-h + overflow on the DEFAULT panel only: fixed overlays don't
+        // extend the page scroll area, so a panel taller than a phone's
+        // viewport would otherwise be cut off with no way to reach the rest.
+        // panelClassName callers (the asset lightbox) budget their own
+        // height and must not inherit the cap.
+        className={`${panelClassName ?? `w-full ${wide ? 'max-w-2xl' : 'max-w-md'} max-h-[85dvh] overflow-y-auto`} rounded-xl border border-[var(--line)] bg-[var(--paper)] shadow-xl`}
       >
         <div className="flex items-center justify-between border-b border-[var(--line)] px-4 py-3">
           <h2 className="m-0 text-sm font-semibold text-[var(--ink)]">{title}</h2>
