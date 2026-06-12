@@ -509,3 +509,14 @@ code {
   --ink-table-add-bg: var(--paper);
   --ink-table-add-fg: var(--ink-soft);
 }
+
+/* Touch devices: keep form fields at 16px so iOS Safari does not auto-zoom
+   the page when a comment composer (or any input) gains focus. Desktop sizes
+   are unchanged — this only fires on coarse-pointer devices. */
+@media (pointer: coarse) {
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
+}

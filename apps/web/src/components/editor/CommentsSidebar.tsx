@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import type * as Y from 'yjs'
 import { CheckCircle2, CornerDownRight, Link2, MessageSquareText, RotateCcw, Unlink } from 'lucide-react'
@@ -351,6 +351,15 @@ function Thread({
   const [replyBody, setReplyBody] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
 
+  // Tapping highlighted text activates its thread; make sure that thread is
+  // actually visible in the panel (it matters most in the mobile sheet, where
+  // only a few cards fit).
+  const rootRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    // Optional call: jsdom has no scrollIntoView.
+    if (active) rootRef.current?.scrollIntoView?.({ block: 'nearest' })
+  }, [active])
+
   const submitReply = async () => {
     if (replyBody.trim() === '') return
     await actions.reply(comment, replyBody.trim())
@@ -360,6 +369,7 @@ function Thread({
 
   return (
     <div
+      ref={rootRef}
       className={`rounded-lg border p-2.5 transition ${
         active ? 'border-[var(--accent)] shadow-sm' : 'border-[var(--line)]'
       } ${resolved ? 'opacity-70' : ''}`}
@@ -396,13 +406,15 @@ function Thread({
       ) : null}
 
       {canComment ? (
-        <div className="mt-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+        // Touch widths: the [11px] text links get taller/wider hit areas
+        // (negative margins keep the card's visual rhythm).
+        <div className="mt-2 flex items-center gap-2 max-lg:gap-3" onClick={(e) => e.stopPropagation()}>
           {!replyOpen ? (
-            <button type="button" onClick={() => setReplyOpen(true)} className="flex items-center gap-1 text-[11px] font-medium text-[var(--ink-faint)] hover:text-[var(--ink)]">
+            <button type="button" onClick={() => setReplyOpen(true)} className="flex items-center gap-1 text-[11px] font-medium text-[var(--ink-faint)] hover:text-[var(--ink)] max-lg:-mx-1.5 max-lg:-my-1.5 max-lg:px-1.5 max-lg:py-2 max-lg:text-xs">
               <CornerDownRight size={11} /> Reply
             </button>
           ) : null}
-          <button type="button" onClick={() => void actions.toggleResolve(comment)} className="flex items-center gap-1 text-[11px] font-medium text-[var(--ink-faint)] hover:text-[var(--ink)]">
+          <button type="button" onClick={() => void actions.toggleResolve(comment)} className="flex items-center gap-1 text-[11px] font-medium text-[var(--ink-faint)] hover:text-[var(--ink)] max-lg:-mx-1.5 max-lg:-my-1.5 max-lg:px-1.5 max-lg:py-2 max-lg:text-xs">
             {comment.resolved ? (
               <>
                 <RotateCcw size={11} /> Reopen
@@ -419,7 +431,7 @@ function Thread({
               disabled={!canReattach}
               onClick={() => void actions.reattach(comment)}
               title={canReattach ? 'Re-attach to the current selection' : 'Select at least 8 characters in the document first'}
-              className="flex items-center gap-1 text-[11px] font-medium text-[var(--accent)] disabled:opacity-40"
+              className="flex items-center gap-1 text-[11px] font-medium text-[var(--accent)] disabled:opacity-40 max-lg:-mx-1.5 max-lg:-my-1.5 max-lg:px-1.5 max-lg:py-2 max-lg:text-xs"
             >
               <Link2 size={11} /> Re-attach to selection
             </button>
@@ -472,7 +484,7 @@ function Reactions({
           type="button"
           disabled={!canComment}
           onClick={() => onReact(emoji)}
-          className={`rounded-full border px-1.5 py-0.5 text-[11px] ${
+          className={`rounded-full border px-1.5 py-0.5 text-[11px] max-lg:px-2.5 max-lg:py-1.5 max-lg:text-xs ${
             me && ids.includes(me.id)
               ? 'border-[var(--accent)] bg-[var(--accent-soft)]'
               : 'border-[var(--line)] bg-[var(--paper-soft)]'
@@ -487,7 +499,7 @@ function Reactions({
           <button
             type="button"
             onClick={() => setPickerOpen(!pickerOpen)}
-            className="rounded-full border border-dashed border-[var(--line)] px-1.5 py-0.5 text-[11px] text-[var(--ink-faint)] hover:text-[var(--ink)]"
+            className="rounded-full border border-dashed border-[var(--line)] px-1.5 py-0.5 text-[11px] text-[var(--ink-faint)] hover:text-[var(--ink)] max-lg:px-2.5 max-lg:py-1.5 max-lg:text-xs"
             title="Add reaction"
           >
             +🙂
@@ -498,7 +510,7 @@ function Reactions({
                 <button
                   key={emoji}
                   type="button"
-                  className="rounded px-1 py-0.5 text-sm hover:bg-[var(--paper-soft)]"
+                  className="rounded px-1 py-0.5 text-sm hover:bg-[var(--paper-soft)] max-lg:px-2 max-lg:py-1.5 max-lg:text-base"
                   onClick={() => {
                     onReact(emoji)
                     setPickerOpen(false)

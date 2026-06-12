@@ -57,6 +57,7 @@ import { presenceColor } from '../../lib/presence.ts'
 import { liveSlug, slugifyDocStem, wikiSlug } from '../../lib/slug.ts'
 import { readWithLegacyMigration } from '../../lib/localStorage.ts'
 import { useLoadingFade } from '../../lib/useLoadingFade.ts'
+import { useIsMobile } from '../../lib/useMediaQuery.ts'
 import { DocumentSkeleton, PanelSkeleton } from '../DocSkeletons.tsx'
 import { Badge, Button, Dialog, Input } from '../ui.tsx'
 import {
@@ -69,6 +70,7 @@ import {
   Pencil,
   Share2,
   Tag,
+  X,
 } from 'lucide-react'
 import CommentsSidebar, { type PendingComment } from './CommentsSidebar.tsx'
 import SuggestionsPanel from './SuggestionsPanel.tsx'
@@ -173,6 +175,14 @@ export function DocEditorPage({ docId, share }: { docId: string; share: string |
 
   const containerRef = useRef<HTMLDivElement>(null)
   const editorRef = useRef<EditorHandles | null>(null)
+
+  // <lg: the comments/suggestions panel becomes a bottom sheet and comment
+  // affordances trade hover/coordinate positioning for fixed touch targets.
+  const isMobile = useIsMobile()
+  // Ref mirror for stable callbacks (revealRange) that only need the value
+  // at call time.
+  const isMobileRef = useRef(isMobile)
+  isMobileRef.current = isMobile
 
   const [ready, setReady] = useState(false)
   // Which doc the live provider has completed its first sync for. Derived
@@ -630,10 +640,12 @@ export function DocEditorPage({ docId, share }: { docId: string; share: string |
     if (ready) editorRef.current?.view.dispatch({ effects: refreshWikiLinksEffect.of(null) })
   }, [ready, docsQuery.data, foldersQuery.data, metaFolderId])
 
-  // Floating "Add comment" bubble next to the selection.
+  // Floating "Add comment" bubble next to the selection (pointer devices
+  // only — on mobile a fixed bottom pill stands in, clear of the native
+  // selection callout and its drag handles).
   useEffect(() => {
     const h = editorRef.current
-    if (!h || !selection || selection.to - selection.from < 8 || !canComment) {
+    if (!h || isMobile || !selection || selection.to - selection.from < 8 || !canComment) {
       setBubble(null)
       return
     }
@@ -647,7 +659,7 @@ export function DocEditorPage({ docId, share }: { docId: string; share: string |
       left: Math.min(Math.max(coords.left - box.left, 8), box.width - 150),
       top: Math.min(Math.max(coords.bottom - box.top + 8, 8), box.height - 40),
     })
-  }, [selection, canComment])
+  }, [selection, canComment, isMobile])
 
   // -------------------------------------------------------------------------
   // Actions
@@ -684,9 +696,17 @@ export function DocEditorPage({ docId, share }: { docId: string; share: string |
     const start = Math.min(range.start, docLength)
     h.view.dispatch({
       selection: EditorSelection.cursor(start),
-      scrollIntoView: true,
+      // Mobile: the bottom sheet covers the lower part of the editor, so pin
+      // the target near the top where it stays visible. Desktop keeps the
+      // minimal "nearest" scroll.
+      effects: EditorView.scrollIntoView(
+        start,
+        isMobileRef.current ? { y: 'start', yMargin: 88 } : { y: 'nearest' },
+      ),
     })
-    h.view.focus()
+    // Focusing the editor on a touch device pops the keyboard over the very
+    // comment the user just tapped — only refocus with a hardware pointer.
+    if (!isMobileRef.current) h.view.focus()
     if (flashSelector) {
       requestAnimationFrame(() => {
         h.view.scrollDOM.querySelectorAll(flashSelector).forEach((el) => {
@@ -860,12 +880,14 @@ export function DocEditorPage({ docId, share }: { docId: string; share: string |
             </span>
           )}
 
-          <Button size="sm" variant="ghost" onClick={toggleSource} title={sourceView ? 'Live preview' : 'Raw source'} className={sourceView ? 'text-[var(--accent)]' : ''}>
+          {/* Secondary tools step back on phone widths so the comment toggle
+              (and Share) never overflow the toolbar. */}
+          <Button size="sm" variant="ghost" onClick={toggleSource} title={sourceView ? 'Live preview' : 'Raw source'} className={`max-sm:hidden ${sourceView ? 'text-[var(--accent)]' : ''}`}>
             <FileCode2 size={15} />
           </Button>
 
           {canEdit ? (
-            <Button size="sm" variant="ghost" onClick={() => setNamingVersion(true)} title="Name this version">
+            <Button size="sm" variant="ghost" onClick={() => setNamingVersion(true)} title="Name this version" className="max-sm:hidden">
               <Tag size={15} />
             </Button>
           ) : null}
@@ -874,7 +896,7 @@ export function DocEditorPage({ docId, share }: { docId: string; share: string |
             to="/d/$docId/history"
             params={{ docId }}
             search={share ? { share } : {}}
-            className="rounded-md p-1.5 text-[var(--ink-soft)] transition hover:bg-[var(--paper-soft)] hover:text-[var(--ink)]"
+            className="rounded-md p-1.5 text-[var(--ink-soft)] transition hover:bg-[var(--paper-soft)] hover:text-[var(--ink)] max-sm:hidden"
             title="Version history"
           >
             <History size={15} />
@@ -887,7 +909,7 @@ export function DocEditorPage({ docId, share }: { docId: string; share: string |
               setSidebarOpen((v) => !v)
             }}
             title="Comments & suggestions"
-            className={sidebarOpen ? 'text-[var(--accent)]' : ''}
+            className={`max-lg:px-3 max-lg:py-2 ${sidebarOpen ? 'text-[var(--accent)]' : ''}`}
           >
             <MessageSquare size={15} />
             {openComments + openSuggestions > 0 ? (
@@ -955,7 +977,9 @@ export function DocEditorPage({ docId, share }: { docId: string; share: string |
           {bubble ? (
             <button
               type="button"
-              onMouseDown={(e) => {
+              onPointerDown={(e) => {
+                // pointerdown (not click): act before the editor blurs and
+                // the selection-driven bubble unmounts under the pointer.
                 e.preventDefault()
                 startComment()
               }}
@@ -965,34 +989,73 @@ export function DocEditorPage({ docId, share }: { docId: string; share: string |
               <MessageSquarePlus size={13} /> Add comment
             </button>
           ) : null}
+          {/* Mobile stand-in for the bubble: a fixed pill at the bottom of the
+              viewport — discoverable, thumb-reachable, and clear of the native
+              text-selection callout. pointerdown so it fires before the tap
+              collapses the selection. */}
+          {isMobile && !sidebarOpen && canComment && selection && selection.to - selection.from >= 8 ? (
+            <button
+              type="button"
+              onPointerDown={(e) => {
+                e.preventDefault()
+                startComment()
+              }}
+              className="fixed bottom-[calc(1.25rem+env(safe-area-inset-bottom))] left-1/2 z-40 flex -translate-x-1/2 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--paper)] px-5 py-3 text-sm font-medium text-[var(--ink)] shadow-lg"
+            >
+              <MessageSquarePlus size={16} /> Comment
+            </button>
+          ) : null}
         </div>
 
         {sidebarOpen ? (
-          <aside className="flex w-[22rem] shrink-0 flex-col border-l border-[var(--line)] bg-[var(--paper)]">
-            <div className="flex shrink-0 border-b border-[var(--line)] text-sm font-medium">
-              <button
-                type="button"
-                onClick={() => setSidebarTab('comments')}
-                className={`flex-1 px-3 py-2 ${sidebarTab === 'comments' ? 'border-b-2 border-[var(--accent)] text-[var(--ink)]' : 'text-[var(--ink-faint)]'}`}
-              >
-                Comments{openComments > 0 ? ` (${openComments})` : ''}
-              </button>
-              <button
-                type="button"
-                onClick={() => setSidebarTab('suggestions')}
-                className={`flex-1 px-3 py-2 ${sidebarTab === 'suggestions' ? 'border-b-2 border-[var(--accent)] text-[var(--ink)]' : 'text-[var(--ink-faint)]'}`}
-              >
-                Suggestions{openSuggestions > 0 ? ` (${openSuggestions})` : ''}
-              </button>
-              <button
-                type="button"
-                onClick={() => setSidebarTab('links')}
-                className={`flex-1 px-3 py-2 ${sidebarTab === 'links' ? 'border-b-2 border-[var(--accent)] text-[var(--ink)]' : 'text-[var(--ink-faint)]'}`}
-              >
-                Links
-              </button>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto">
+          <>
+            {/* Mobile scrim: the panel overlays as a bottom sheet; tapping
+                outside dismisses it. Desktop (lg+) keeps the side-by-side
+                column and never renders this. */}
+            <div
+              className="fixed inset-0 z-[65] bg-black/40 lg:hidden"
+              onClick={() => setSidebarOpen(false)}
+              aria-hidden
+            />
+            <aside
+              aria-label="Comments and suggestions"
+              className="fixed inset-x-0 bottom-0 z-[70] flex h-[70dvh] flex-col rounded-t-2xl border-t border-[var(--line)] bg-[var(--paper)] pb-[env(safe-area-inset-bottom)] shadow-2xl lg:static lg:z-auto lg:h-auto lg:w-[22rem] lg:shrink-0 lg:rounded-none lg:border-l lg:border-t-0 lg:pb-0 lg:shadow-none"
+            >
+              <div className="flex items-center justify-center pt-2 lg:hidden" aria-hidden>
+                <span className="h-1 w-9 rounded-full bg-[var(--line)]" />
+              </div>
+              <div className="flex shrink-0 items-stretch border-b border-[var(--line)] text-sm font-medium">
+                <button
+                  type="button"
+                  onClick={() => setSidebarTab('comments')}
+                  className={`flex-1 px-3 py-2 max-lg:py-3 ${sidebarTab === 'comments' ? 'border-b-2 border-[var(--accent)] text-[var(--ink)]' : 'text-[var(--ink-faint)]'}`}
+                >
+                  Comments{openComments > 0 ? ` (${openComments})` : ''}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSidebarTab('suggestions')}
+                  className={`flex-1 px-3 py-2 max-lg:py-3 ${sidebarTab === 'suggestions' ? 'border-b-2 border-[var(--accent)] text-[var(--ink)]' : 'text-[var(--ink-faint)]'}`}
+                >
+                  Suggestions{openSuggestions > 0 ? ` (${openSuggestions})` : ''}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSidebarTab('links')}
+                  className={`flex-1 px-3 py-2 max-lg:py-3 ${sidebarTab === 'links' ? 'border-b-2 border-[var(--accent)] text-[var(--ink)]' : 'text-[var(--ink-faint)]'}`}
+                >
+                  Links
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSidebarOpen(false)}
+                  aria-label="Close panel"
+                  className="px-3 text-[var(--ink-soft)] lg:hidden"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto">
               {sidebarTab === 'links' ? (
                 <BacklinksPanel docId={docId} share={share} />
               ) : sidebarTab === 'comments' ? (
@@ -1049,8 +1112,9 @@ export function DocEditorPage({ docId, share }: { docId: string; share: string |
                   report={report}
                 />
               )}
-            </div>
-          </aside>
+              </div>
+            </aside>
+          </>
         ) : null}
       </div>
 

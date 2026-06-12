@@ -39,7 +39,9 @@ export const Route = createRootRoute({
       },
       {
         name: 'viewport',
-        content: 'width=device-width, initial-scale=1',
+        // viewport-fit=cover lets fixed chrome (the mobile comment sheet/pill)
+        // extend under the home-indicator area and pad with safe-area insets.
+        content: 'width=device-width, initial-scale=1, viewport-fit=cover',
       },
       {
         title: 'Glyphdown',
