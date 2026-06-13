@@ -160,11 +160,6 @@ export default function FileBrowser({ folderId }: { folderId: string | null }) {
   const hasDocDrag = (e: DragEvent) => e.dataTransfer.types.includes(DOC_DRAG_MIME)
   const hasFolderDrag = (e: DragEvent) => e.dataTransfer.types.includes(FOLDER_DRAG_MIME)
   const hasAnyDrag = (e: DragEvent) => hasDocDrag(e) || (hasFolderDrag(e) && draggingFolder !== null)
-  const hasOsFileDrag = (e: DragEvent) =>
-    currentFolder !== null &&
-    e.dataTransfer.types.includes('Files') &&
-    !e.dataTransfer.types.includes(DOC_DRAG_MIME) &&
-    !e.dataTransfer.types.includes(FOLDER_DRAG_MIME)
 
   /** Shared drop handler: move whatever was dragged into `parentId` (a breadcrumb folder, vault root included). */
   const dropTo = (e: DragEvent, parentId: string | null) => {
@@ -246,6 +241,59 @@ export default function FileBrowser({ folderId }: { folderId: string | null }) {
     setFileDropBusy(false)
   }
 
+  // Page-wide drop target: the listeners live on `window` (not the list) so
+  // files can be dropped ANYWHERE on the page. Refs feed the handlers the
+  // latest folder / busy state without re-binding mid-drag, and the depth
+  // counter survives the dragenter/dragleave storms child elements emit.
+  const currentFolderRef = useRef(currentFolder)
+  currentFolderRef.current = currentFolder
+  const fileDropBusyRef = useRef(fileDropBusy)
+  fileDropBusyRef.current = fileDropBusy
+  const handleFileDropRef = useRef(handleFileDrop)
+  handleFileDropRef.current = handleFileDrop
+
+  useEffect(() => {
+    const osFiles = (dt: DataTransfer | null) =>
+      currentFolderRef.current !== null &&
+      dt !== null &&
+      dt.types.includes('Files') &&
+      !dt.types.includes(DOC_DRAG_MIME) &&
+      !dt.types.includes(FOLDER_DRAG_MIME)
+
+    const onEnter = (e: WindowEventMap['dragenter']) => {
+      if (!osFiles(e.dataTransfer)) return
+      e.preventDefault()
+      fileDragDepthRef.current += 1
+      setFileDragOver(true)
+    }
+    const onOver = (e: WindowEventMap['dragover']) => {
+      if (!osFiles(e.dataTransfer)) return
+      e.preventDefault()
+      if (e.dataTransfer) e.dataTransfer.dropEffect = fileDropBusyRef.current ? 'none' : 'copy'
+    }
+    const onLeave = (e: WindowEventMap['dragleave']) => {
+      if (!osFiles(e.dataTransfer)) return
+      fileDragDepthRef.current = Math.max(0, fileDragDepthRef.current - 1)
+      if (fileDragDepthRef.current === 0) setFileDragOver(false)
+    }
+    const onDrop = (e: WindowEventMap['drop']) => {
+      if (!osFiles(e.dataTransfer)) return
+      e.preventDefault()
+      resetFileDrag()
+      void handleFileDropRef.current(e.dataTransfer!.files)
+    }
+    window.addEventListener('dragenter', onEnter)
+    window.addEventListener('dragover', onOver)
+    window.addEventListener('dragleave', onLeave)
+    window.addEventListener('drop', onDrop)
+    return () => {
+      window.removeEventListener('dragenter', onEnter)
+      window.removeEventListener('dragover', onOver)
+      window.removeEventListener('dragleave', onLeave)
+      window.removeEventListener('drop', onDrop)
+    }
+  }, [])
+
   const ctx: BrowseCtx = {
     renaming,
     dragOverId: dragOver,
@@ -282,36 +330,10 @@ export default function FileBrowser({ folderId }: { folderId: string | null }) {
   const isEmpty = listing.folders.length === 0 && listing.docs.length === 0 && visibleAssets.length === 0
 
   return (
-    <main
-      className={`page-wrap relative py-8 ${
-        fileDragOver ? 'rounded-xl bg-[var(--accent-soft)] outline outline-2 -outline-offset-2 outline-[var(--accent)]' : ''
-      }`}
-      onDragEnter={(e) => {
-        if (!hasOsFileDrag(e)) return
-        e.preventDefault()
-        fileDragDepthRef.current += 1
-        setFileDragOver(true)
-      }}
-      onDragOver={(e) => {
-        if (!hasOsFileDrag(e)) return
-        e.preventDefault()
-        e.dataTransfer.dropEffect = fileDropBusy ? 'none' : 'copy'
-      }}
-      onDragLeave={(e) => {
-        if (!hasOsFileDrag(e)) return
-        fileDragDepthRef.current = Math.max(0, fileDragDepthRef.current - 1)
-        if (fileDragDepthRef.current === 0) setFileDragOver(false)
-      }}
-      onDrop={(e) => {
-        if (!hasOsFileDrag(e)) return
-        e.preventDefault()
-        resetFileDrag()
-        void handleFileDrop(e.dataTransfer.files)
-      }}
-    >
+    <main className="page-wrap py-8">
       {fileDragOver && currentFolder ? (
-        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-xl border-2 border-dashed border-[var(--accent)] bg-[var(--accent-soft)]/90">
-          <div className="rounded-lg bg-[var(--paper)] px-4 py-2 text-sm font-medium text-[var(--ink)] shadow-lg">
+        <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-[var(--accent-soft)]/80 backdrop-blur-[1px]">
+          <div className="rounded-xl border-2 border-dashed border-[var(--accent)] bg-[var(--paper)] px-6 py-4 text-sm font-medium text-[var(--ink)] shadow-xl">
             Drop files to add to {currentFolder.name}
           </div>
         </div>

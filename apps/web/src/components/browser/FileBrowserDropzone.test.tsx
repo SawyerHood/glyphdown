@@ -202,6 +202,19 @@ describe('FileBrowser OS file dropzone', () => {
     )
   })
 
+  it('accepts a drop anywhere on the page, not just over the list', async () => {
+    renderBrowser('owner')
+    await browserMain() // ensure mounted before dropping outside <main>
+
+    // document.body sits outside the file list; the window-level listeners
+    // should still catch the drop.
+    fireEvent.dragEnter(document.body, dragData([file('chart.png', 'image/png')]))
+    fireEvent.drop(document.body, dragData([file('chart.png', 'image/png')]))
+
+    await waitFor(() => expect(h.uploadFolderAsset).toHaveBeenCalledTimes(1))
+    expect(h.uploadFolderAsset.mock.calls[0]![1]).toBe('chart.png')
+  })
+
   it('uses the HTML asset path for extension-only HTML files', async () => {
     renderBrowser('owner')
 
