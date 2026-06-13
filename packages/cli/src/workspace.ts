@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { normalizeEol } from '@glyphdown/core'
 import { slugifyDocStem } from '@glyphdown/protocol'
@@ -31,6 +31,23 @@ export interface Workspace {
   meta: DocWorkspaceMeta
   /** Normalized contents of .glyphdown/<docId>/base.md. */
   baseText: string
+}
+
+export interface DocTombstone {
+  docId: string
+  file: string
+  serverUrl: string
+  baseHash: string
+  versionId?: string
+  origin: 'rm-command' | 'local-delete' | 'remote-gone'
+  recordedAt: number
+  archivedPath?: string
+  localChanged?: boolean
+}
+
+export interface TombstoneFile {
+  version: 1
+  docs: Record<string, DocTombstone>
 }
 
 /** Bookkeeping dir name used for NEW clones/pulls. */
@@ -69,6 +86,50 @@ export function slugify(title: string): string {
 /** Per-doc bookkeeping dir: <workspaceRoot>/<docId>. */
 export function docStateDir(dir: string, docId: string): string {
   return join(workspaceRoot(dir), docId)
+}
+
+export function tombstonesPath(dir: string): string {
+  return join(workspaceRoot(dir), 'tombstones.json')
+}
+
+export function readTombstones(dir: string): TombstoneFile {
+  const path = tombstonesPath(dir)
+  if (!existsSync(path)) return { version: 1, docs: {} }
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<TombstoneFile>
+    if (parsed.version === 1 && parsed.docs && typeof parsed.docs === 'object') {
+      return { version: 1, docs: parsed.docs as Record<string, DocTombstone> }
+    }
+  } catch {
+    // Corrupt tombstones are ignored; the next write recreates the file.
+  }
+  return { version: 1, docs: {} }
+}
+
+export function writeTombstone(dir: string, tombstone: DocTombstone): void {
+  const next = readTombstones(dir)
+  next.docs[tombstone.docId] = tombstone
+  mkdirSync(workspaceRoot(dir), { recursive: true })
+  writeFileSync(tombstonesPath(dir), `${JSON.stringify(next, null, 2)}\n`)
+}
+
+export function removeDocState(dir: string, docId: string): void {
+  rmSync(docStateDir(dir, docId), { recursive: true, force: true })
+}
+
+export function archiveDocFile(dir: string, meta: DocWorkspaceMeta, kind: 'docs' | 'conflicts' = 'docs'): string | null {
+  const source = join(dir, meta.file)
+  if (!existsSync(source)) return null
+  const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z').replace(/[-:]/g, '')
+  const archiveDir = join(workspaceRoot(dir), 'trash', kind)
+  mkdirSync(archiveDir, { recursive: true })
+  const safeDocId = meta.docId.replace(/[^A-Za-z0-9_-]+/g, '-')
+  const safeFile = basename(meta.file).replace(/[^A-Za-z0-9._-]+/g, '-')
+  const base = `${stamp}-${safeDocId}-${safeFile}`
+  let target = join(archiveDir, base)
+  for (let n = 2; existsSync(target); n++) target = join(archiveDir, `${base}-${n}`)
+  renameSync(source, target)
+  return target
 }
 
 export interface RecordBaseOptions {

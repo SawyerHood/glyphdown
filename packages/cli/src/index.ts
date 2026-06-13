@@ -79,15 +79,20 @@ export type {
 export {
   WORKSPACE_DIR,
   WORKSPACE_DIR_LEGACY,
+  archiveDocFile,
   docStateDir,
   findWorkspace,
   listMetas,
   loadWorkspace,
+  readTombstones,
   recordBase,
+  removeDocState,
   rewriteMeta,
   sha256Hex,
   slugify,
+  tombstonesPath,
   workspaceRoot,
+  writeTombstone,
   writePull,
 } from './workspace.ts'
-export type { DocWorkspaceMeta, RecordBaseOptions, Workspace, WritePullOptions } from './workspace.ts'
+export type { DocTombstone, DocWorkspaceMeta, RecordBaseOptions, TombstoneFile, Workspace, WritePullOptions } from './workspace.ts'

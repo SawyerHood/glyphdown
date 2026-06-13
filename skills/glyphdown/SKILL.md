@@ -39,6 +39,14 @@ For reviewable changes: `glyphdown push <file> --suggest -m "why"` (or sync with
 
 `glyphdown mv <file> <new-name>` — NEVER bare `mv`: sync does not detect renames, so the old name re-pulls and the new file becomes a duplicate doc. `mv` renames the local file and the server filename together.
 
+## Deletes
+
+`glyphdown rm <file>` (alias: `glyphdown delete <file>`) deletes a tracked doc
+on the server, archives the local markdown file under `.glyphdown/trash/docs/`,
+and removes active tracking metadata so later syncs do not re-pull it. NEVER
+bare `rm` for an intentional doc delete: deleting the file by hand still
+re-pulls it on sync.
+
 ## Comments
 
 ```sh
@@ -66,5 +74,5 @@ The token IS the capability — treat share URLs as secrets.
 - `--json` on read commands (`list`, `vaults`, `cat`, `comments`, `suggestions`, `new`, `sync`, `share`) for parsing.
 - Filenames are canonical slugs (`[a-z0-9-]` + `.md`); the file name IS the doc name everywhere. The `# heading` is just content.
 - Don't rewrite >60% of a shared doc in one push (the server refuses with exit 3). `glyphdown snapshot <doc> -m "msg"` before big changes.
-- Deletions never propagate: deleted local files re-pull; server-deleted docs warn (`remote gone`) and stay local. Delete via the web UI.
+- Deletions never propagate implicitly: deleted local files re-pull; server-deleted docs warn (`remote gone`) and stay local. Use `glyphdown rm <file>` for intentional doc deletes.
 - Never edit `.glyphdown/` (the push bookkeeping). Sync sequentially — one sync at a time per workspace; pushes are rate-limited 60/min.

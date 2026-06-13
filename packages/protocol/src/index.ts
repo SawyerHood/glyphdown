@@ -167,6 +167,7 @@ export type ClientMessage = { t: 'suggestion-upsert'; suggestion: SuggestionReco
 //          `filename-taken` on collision — no silent suffixing.
 //          `folderId: null` is rejected (400 `bad-folder`): every doc lives
 //          in a vault's subtree, there is no root scope to move into.
+// DELETE /api/docs/:id                        -> { ok: true } (owner-only soft delete)
 // POST   /api/docs/:id/restore                -> {} -> DocMeta (owner-only)
 //          Restores a trashed doc. If its folder is gone (or it was trashed
 //          from the pre-vault root), it re-homes into the owner's default

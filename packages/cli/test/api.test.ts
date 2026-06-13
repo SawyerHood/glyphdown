@@ -97,6 +97,15 @@ describe('createApi', () => {
     const api = apiWith(fetchMock)
     await expect(api.push('doc1', { newText: 'x', baseHash: 'h' })).rejects.toBeInstanceOf(CliError)
   })
+
+  it('deletes a doc with DELETE /api/docs/:id', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ ok: true })) as unknown as typeof fetch
+    const api = apiWith(fetchMock)
+    await api.deleteDoc('doc1')
+    const [url, init] = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls[0]! as [string, RequestInit]
+    expect(url).toBe(`${SERVER}/api/docs/doc1`)
+    expect(init.method).toBe('DELETE')
+  })
 })
 
 describe('share links', () => {

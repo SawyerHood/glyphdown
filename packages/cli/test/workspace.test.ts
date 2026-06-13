@@ -3,7 +3,19 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { normalizeEol } from '@glyphdown/core'
 import { afterEach, describe, expect, it } from 'vitest'
-import { CliError, findWorkspace, parseDocRef, recordBase, sha256Hex, slugify, workspaceRoot, writePull } from '../src/index.ts'
+import {
+  CliError,
+  archiveDocFile,
+  findWorkspace,
+  parseDocRef,
+  recordBase,
+  removeDocState,
+  sha256Hex,
+  slugify,
+  workspaceRoot,
+  writePull,
+  writeTombstone,
+} from '../src/index.ts'
 
 const dirs: string[] = []
 function tmp(): string {
@@ -132,6 +144,36 @@ describe('recordBase', () => {
     const stored = JSON.parse(readFileSync(join(dir, '.glyphdown', 'd1', 'meta.json'), 'utf8')) as Record<string, unknown>
     expect(stored.baseHash).toBe(meta.baseHash)
     expect(stored.versionId).toBe('v9')
+  })
+})
+
+describe('delete helpers', () => {
+  it('archives a tracked doc file, removes active state, and writes a tombstone', () => {
+    const dir = tmp()
+    const ws = writePull({ targetPath: 'doc.md', docId: 'd1', serverUrl: 'https://s', text: 'before\n' }, dir)
+    writeFileSync(join(dir, 'doc.md'), 'local edit\n')
+
+    const archived = archiveDocFile(dir, ws.meta, 'docs')
+    expect(archived).not.toBeNull()
+    expect(archived).toContain(join(dir, '.glyphdown', 'trash', 'docs'))
+    expect(readFileSync(archived!, 'utf8')).toBe('local edit\n')
+    expect(existsSync(join(dir, 'doc.md'))).toBe(false)
+
+    writeTombstone(dir, {
+      docId: ws.meta.docId,
+      file: ws.meta.file,
+      serverUrl: ws.meta.serverUrl,
+      baseHash: ws.meta.baseHash,
+      origin: 'rm-command',
+      recordedAt: 123,
+      archivedPath: archived!,
+      localChanged: true,
+    })
+    const tombstones = JSON.parse(readFileSync(join(dir, '.glyphdown', 'tombstones.json'), 'utf8')) as Record<string, unknown>
+    expect(tombstones).toMatchObject({ version: 1, docs: { d1: { file: 'doc.md', origin: 'rm-command' } } })
+
+    removeDocState(dir, 'd1')
+    expect(existsSync(join(dir, '.glyphdown', 'd1'))).toBe(false)
   })
 })
 

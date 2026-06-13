@@ -75,6 +75,7 @@ glyphdown list --json                       # docs you can access
 glyphdown pull https://glyphdown.com/d/abc123 # or: glyphdown pull abc123 notes.md
 # ... edit launch-plan.md with your normal tools ...
 glyphdown push launch-plan.md -m "tighten the intro"
+glyphdown rm launch-plan.md                 # explicit server delete + local tracking cleanup
 ```
 
 `glyphdown pull` writes the doc under its **canonical filename** (every doc's
@@ -85,6 +86,11 @@ server stores it and every machine uses it verbatim) plus `.glyphdown/<docId>/me
 `glyphdown push` diffs your file against that base server-side; if the server's base
 cache misses it automatically re-sends `base.md`. On clean success the base
 files are updated so you can keep editing and push again without re-pulling.
+
+`glyphdown rm <file>` (alias: `glyphdown delete <file>`) deletes a tracked doc
+on the server, archives the local markdown file under `.glyphdown/trash/docs/`,
+removes `.glyphdown/<docId>/`, and writes a tombstone. Because the active
+metadata is gone, later `glyphdown sync` runs do not re-pull that doc.
 
 ### Exit codes (check these)
 
@@ -152,13 +158,14 @@ workspace rooted at the vault: the root gets `.glyphdown/folder.json`, not
 | **new server doc** | materialized into the matching local dir, nested paths included (`new`) |
 | **new server folder** | materialized as a nested local dir (`new folder (server)`) |
 | server-side folder **rename/move** | noted (`folder renamed (server)`); the local dir is **not** renamed or moved — mapping is by folder id in `.glyphdown/folder.json`, so sync keeps resolving it (v1) |
-| tracked doc, **local file deleted** | re-pulled from the server (`local missing — re-pulled`); the server doc is never deleted |
+| tracked doc, **local file deleted** | re-pulled from the server (`local missing — re-pulled`); use `glyphdown rm <file>` for an intentional server delete |
 | **doc deleted server-side** | warning (`remote gone`); the local file is left alone |
 
-**Deletions never propagate in either direction** (v1): deleting a local file
+**Deletions never propagate implicitly** (v1): deleting a local file by hand
 re-downloads it on the next sync (same for assets); deleting a server doc
-leaves the local file in place with a warning. Delete on the server via the
-web UI when you mean it.
+outside the CLI leaves the local file in place with a warning. Use
+`glyphdown rm <file>` when you mean to delete a tracked doc from both the
+server and active local tracking state.
 
 **Renames: use `glyphdown mv`.** Sync does NOT detect local renames — renaming
 a tracked file by hand re-pulls the old name AND creates a duplicate doc from
