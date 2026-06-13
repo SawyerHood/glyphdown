@@ -45,7 +45,9 @@ For reviewable changes: `glyphdown push <file> --suggest -m "why"` (or sync with
 on the server, archives the local markdown file under `.glyphdown/trash/docs/`,
 and removes active tracking metadata so later syncs do not re-pull it. NEVER
 bare `rm` for an intentional doc delete: deleting the file by hand still
-re-pulls it on sync.
+re-pulls it on sync. It refuses if the remote changed since your local base;
+re-sync first or pass `--force` only when discarding remote edits is
+intentional.
 
 ## Comments
 
@@ -74,5 +76,5 @@ The token IS the capability — treat share URLs as secrets.
 - `--json` on read commands (`list`, `vaults`, `cat`, `comments`, `suggestions`, `new`, `sync`, `share`) for parsing.
 - Filenames are canonical slugs (`[a-z0-9-]` + `.md`); the file name IS the doc name everywhere. The `# heading` is just content.
 - Don't rewrite >60% of a shared doc in one push (the server refuses with exit 3). `glyphdown snapshot <doc> -m "msg"` before big changes.
-- Deletions never propagate implicitly: deleted local files re-pull; server-deleted docs warn (`remote gone`) and stay local. Use `glyphdown rm <file>` for intentional doc deletes.
+- Deletions never propagate implicitly: deleted local files re-pull; server-deleted docs warn (`remote gone`) and stay local. Use `glyphdown rm <file>` for intentional doc deletes; it refuses remote drift unless you pass `--force`.
 - Never edit `.glyphdown/` (the push bookkeeping). Sync sequentially — one sync at a time per workspace; pushes are rate-limited 60/min.

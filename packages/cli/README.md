@@ -90,7 +90,9 @@ files are updated so you can keep editing and push again without re-pulling.
 `glyphdown rm <file>` (alias: `glyphdown delete <file>`) deletes a tracked doc
 on the server, archives the local markdown file under `.glyphdown/trash/docs/`,
 removes `.glyphdown/<docId>/`, and writes a tombstone. Because the active
-metadata is gone, later `glyphdown sync` runs do not re-pull that doc.
+metadata is gone, later `glyphdown sync` runs do not re-pull that doc. It
+refuses if the remote changed since your local base; re-sync first or pass
+`--force` only when discarding remote edits is intentional.
 
 ### Exit codes (check these)
 
@@ -165,7 +167,8 @@ workspace rooted at the vault: the root gets `.glyphdown/folder.json`, not
 re-downloads it on the next sync (same for assets); deleting a server doc
 outside the CLI leaves the local file in place with a warning. Use
 `glyphdown rm <file>` when you mean to delete a tracked doc from both the
-server and active local tracking state.
+server and active local tracking state. It refuses if the remote changed since
+your local base unless you pass `--force`.
 
 **Renames: use `glyphdown mv`.** Sync does NOT detect local renames — renaming
 a tracked file by hand re-pulls the old name AND creates a duplicate doc from

@@ -62,6 +62,10 @@ function parseIntStrict(value: string): number {
   return n
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 export function createProgram(deps: ProgramDeps = {}): Command {
   const env = deps.env ?? process.env
   const cwd = deps.cwd ?? (() => process.cwd())
@@ -321,17 +325,39 @@ export function createProgram(deps: ProgramDeps = {}): Command {
     .alias('delete')
     .description('delete a tracked doc on the server and remove local tracking metadata')
     .argument('<file>', 'tracked markdown file (pulled/cloned here)')
+    .option('--force', 'delete even when the remote changed since this workspace base')
     .option('--json', 'machine-readable output')
-    .action(async (fileArg: string, opts: { json?: boolean }) => {
+    .action(async (fileArg: string, opts: { force?: boolean; json?: boolean }) => {
       const ws = findWorkspace(fileArg, cwd())
       const api = apiFor(ws.meta.serverUrl)
-      await api.deleteDoc(ws.meta.docId)
+
+      const content = await api.getContent(ws.meta.docId, 'working')
+      const remoteHash = content.baseHash ?? sha256Hex(content.text)
+      if (!opts.force && remoteHash !== ws.meta.baseHash) {
+        throw new CliError(1, 'remote changed since your base - re-sync or use --force to delete anyway')
+      }
 
       const archivedPath = archiveDocFile(ws.dir, ws.meta, 'docs') ?? undefined
       const localChanged =
         archivedPath !== undefined
           ? sha256Hex(normalizeEol(readFileSync(archivedPath, 'utf8'))) !== ws.meta.baseHash
           : undefined
+      try {
+        await api.deleteDoc(ws.meta.docId)
+      } catch (error) {
+        if (archivedPath !== undefined) {
+          try {
+            renameSync(archivedPath, ws.path)
+          } catch (rollbackError) {
+            throw new CliError(
+              1,
+              `server delete failed (${errorMessage(error)}), and restoring the archived local file failed (${errorMessage(rollbackError)}); archived at ${archivedPath}`,
+            )
+          }
+        }
+        throw error
+      }
+
       writeTombstone(ws.dir, {
         docId: ws.meta.docId,
         file: ws.meta.file,

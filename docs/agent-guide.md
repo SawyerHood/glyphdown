@@ -27,7 +27,7 @@ Resolution order: `GLYPHDOWN_API_KEY` env → `GLYPHDOWN_SERVER` env → the con
 | `glyphdown cat <doc> [--clean] [--json]` | print a doc to stdout (`--clean` strips pending suggested insertions) |
 | `glyphdown new <name> [--folder <folderId> \| --vault <vault>] [--json]` | create a doc (name slugified into `<slug>.md`); prints id + URL. Neither flag → your default vault |
 | `glyphdown mv <file> <new-name>` | rename a tracked doc: local file AND server filename together |
-| `glyphdown rm <file>` / `glyphdown delete <file>` | delete a tracked doc on the server, archive the local file, and remove local tracking metadata |
+| `glyphdown rm <file> [--force]` / `glyphdown delete <file> [--force]` | delete a tracked doc on the server, archive the local file, and remove local tracking metadata |
 | `glyphdown clone [dir] [--vault <vault>]` | mirror every accessible folder/doc — or one vault's subtree — into a workspace (default `./glyphdown`, or `./<vault-slug>` with `--vault`) |
 | `glyphdown pull [doc] [path] [--clean] [--folder <folderRef>]` | pull one doc — or a whole folder by id/exact name (vault names/ids work: a vault IS a folder) |
 | `glyphdown push [path] [--all] [--suggest] [--force] [-m <note>]` | merge local file edits into the live doc through the CRDT |
@@ -127,7 +127,9 @@ Workspace-level actions in the same run:
 tracked file by hand re-pulls it. Use `glyphdown rm <file>` (alias:
 `glyphdown delete <file>`) when you mean to delete the server doc; it archives
 the local file under `.glyphdown/trash/docs/`, removes active metadata, and
-prevents later syncs from re-pulling that doc.
+prevents later syncs from re-pulling that doc. It refuses if the remote changed
+since your local base; re-sync first or pass `--force` only when discarding
+remote edits is intentional.
 
 **Local renames are not detected.** Renaming a tracked file by hand re-pulls the old name AND creates a duplicate doc from the new file — sync warns loudly when it sees that pattern. Use `glyphdown mv <file> <new-name>` (server rename first — a `filename taken` collision aborts before anything moves — then the local file and manifest).
 
