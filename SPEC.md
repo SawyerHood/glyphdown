@@ -209,6 +209,7 @@ glyphdown pull --folder <ref> [dir]   # pull a whole folder; <ref> is an id or n
 glyphdown push [path] [--suggest] [--force] [-m note]
 glyphdown new <name> [--folder f | --vault v]  # create doc named <slug-of-name>.md; neither flag → your default vault
 glyphdown mv <file> <new-name>        # rename a tracked doc: local file AND server filename, atomically
+glyphdown rm <file> [--force]         # delete a tracked doc on the server; archive local file and remove tracking
 glyphdown comments <doc>              # list open threads (text quotes + ids)
 glyphdown comment <doc> --reply <threadId> --body "..."   # reply; --resolve to resolve
 glyphdown comment <doc> --line N --body "..."             # new anchored comment

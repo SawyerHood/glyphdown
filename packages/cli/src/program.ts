@@ -20,7 +20,19 @@ import { parseDocRef, parseShareToken } from './docref.ts'
 import { CliError, DEGENERATE_MESSAGE } from './errors.ts'
 import { clone, syncWorkspace } from './mirror.ts'
 import { type SyncAction, type SyncDocResult, pullFolder, pushAll, readFolderConfig, resolveFolder, resolveVault, syncExitCode } from './sync.ts'
-import { findWorkspace, listMetas, recordBase, rewriteMeta, slugify, workspaceRoot, writePull } from './workspace.ts'
+import {
+  archiveDocFile,
+  findWorkspace,
+  listMetas,
+  recordBase,
+  removeDocState,
+  rewriteMeta,
+  sha256Hex,
+  slugify,
+  workspaceRoot,
+  writePull,
+  writeTombstone,
+} from './workspace.ts'
 
 export { DEGENERATE_MESSAGE }
 
@@ -48,6 +60,10 @@ function parseIntStrict(value: string): number {
   const n = Number.parseInt(value, 10)
   if (!Number.isInteger(n)) throw new CliError(1, `not a number: ${value}`)
   return n
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 export function createProgram(deps: ProgramDeps = {}): Command {
@@ -301,6 +317,78 @@ export function createProgram(deps: ProgramDeps = {}): Command {
         )
       }
       out(`renamed ${ws.meta.file} → ${canonical} (local file and server filename)`)
+    })
+
+  // -- rm / delete ------------------------------------------------------------
+  program
+    .command('rm')
+    .alias('delete')
+    .description('delete a tracked doc on the server and remove local tracking metadata')
+    .argument('<file>', 'tracked markdown file (pulled/cloned here)')
+    .option('--force', 'delete even when the remote changed since this workspace base')
+    .option('--json', 'machine-readable output')
+    .action(async (fileArg: string, opts: { force?: boolean; json?: boolean }) => {
+      const ws = findWorkspace(fileArg, cwd())
+      const api = apiFor(ws.meta.serverUrl)
+
+      const content = await api.getContent(ws.meta.docId, 'working')
+      const remoteHash = content.baseHash ?? sha256Hex(content.text)
+      if (!opts.force && remoteHash !== ws.meta.baseHash) {
+        throw new CliError(1, 'remote changed since your base - re-sync or use --force to delete anyway')
+      }
+
+      const archivedPath = archiveDocFile(ws.dir, ws.meta, 'docs') ?? undefined
+      const localChanged =
+        archivedPath !== undefined
+          ? sha256Hex(normalizeEol(readFileSync(archivedPath, 'utf8'))) !== ws.meta.baseHash
+          : undefined
+      try {
+        await api.deleteDoc(ws.meta.docId)
+      } catch (error) {
+        if (archivedPath !== undefined) {
+          try {
+            renameSync(archivedPath, ws.path)
+          } catch (rollbackError) {
+            throw new CliError(
+              1,
+              `server delete failed (${errorMessage(error)}), and restoring the archived local file failed (${errorMessage(rollbackError)}); archived at ${archivedPath}`,
+            )
+          }
+        }
+        throw error
+      }
+
+      writeTombstone(ws.dir, {
+        docId: ws.meta.docId,
+        file: ws.meta.file,
+        serverUrl: ws.meta.serverUrl,
+        baseHash: ws.meta.baseHash,
+        ...(ws.meta.versionId !== undefined ? { versionId: ws.meta.versionId } : {}),
+        origin: 'rm-command',
+        recordedAt: Date.now(),
+        ...(archivedPath !== undefined ? { archivedPath } : {}),
+        ...(localChanged !== undefined ? { localChanged } : {}),
+      })
+      removeDocState(ws.dir, ws.meta.docId)
+
+      if (opts.json) {
+        out(
+          JSON.stringify(
+            {
+              docId: ws.meta.docId,
+              file: ws.meta.file,
+              action: 'deleted',
+              ...(archivedPath !== undefined ? { archivedPath } : {}),
+            },
+            null,
+            2,
+          ),
+        )
+        return
+      }
+      out(`deleted ${ws.meta.file} on the server`)
+      if (archivedPath !== undefined) out(pc.dim(`local file archived at ${archivedPath}`))
+      out(pc.dim(`local tracking removed from ${basename(workspaceRoot(ws.dir))}/${ws.meta.docId}/`))
     })
 
   // -- clone ------------------------------------------------------------------

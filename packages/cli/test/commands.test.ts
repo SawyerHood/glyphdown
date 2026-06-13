@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Comment, DocMeta, PushResponse, ShareLinkRole } from '@glyphdown/protocol'
@@ -35,6 +35,7 @@ function fakeApi(overrides: Partial<Api> = {}): Api {
     getDoc: vi.fn(async () => DOC),
     createDoc: vi.fn(async () => DOC),
     renameDoc: vi.fn(async () => DOC),
+    deleteDoc: vi.fn(async () => undefined),
     listFolders: vi.fn(async () => []),
     getFolder: vi.fn(),
     createFolder: vi.fn(),
@@ -89,6 +90,123 @@ function harness(dir: string, api: Api): Harness {
   })
   return { api, lines, errors, run: (args) => program.parseAsync(args, { from: 'user' }).then(() => undefined) }
 }
+
+describe('glyphdown rm', () => {
+  const baseText = '# Title\n\nbase\n'
+  const baseHash = sha256Hex(baseText)
+
+  function pulledDir(): string {
+    const dir = tmp()
+    writePull(
+      { targetPath: 'doc.md', docId: 'doc1', serverUrl: 'https://ink.example', text: baseText, versionId: 'v1' },
+      dir,
+    )
+    return dir
+  }
+
+  function rmApi(overrides: Partial<Api> = {}): Api {
+    return fakeApi({
+      getContent: vi.fn(async () => ({ text: baseText, versionId: 'v1', baseHash })),
+      ...overrides,
+    })
+  }
+
+  it('deletes the remote doc, archives the local file, removes active metadata, and writes a tombstone', async () => {
+    const dir = pulledDir()
+    writeFileSync(join(dir, 'doc.md'), '# Title\n\nlocal notes\n')
+    const api = rmApi()
+    const h = harness(dir, api)
+
+    await h.run(['rm', 'doc.md', '--json'])
+
+    expect(api.getContent).toHaveBeenCalledWith('doc1', 'working')
+    expect(api.deleteDoc).toHaveBeenCalledWith('doc1')
+    expect(existsSync(join(dir, 'doc.md'))).toBe(false)
+    expect(existsSync(join(dir, '.glyphdown', 'doc1', 'meta.json'))).toBe(false)
+    expect(existsSync(join(dir, '.glyphdown', 'doc1', 'base.md'))).toBe(false)
+
+    const result = JSON.parse(h.lines.join('\n')) as { docId: string; action: string; archivedPath: string }
+    expect(result).toMatchObject({ docId: 'doc1', file: 'doc.md', action: 'deleted' })
+    expect(result.archivedPath).toContain(join(dir, '.glyphdown', 'trash', 'docs'))
+    expect(readFileSync(result.archivedPath, 'utf8')).toBe('# Title\n\nlocal notes\n')
+
+    const tombstones = JSON.parse(readFileSync(join(dir, '.glyphdown', 'tombstones.json'), 'utf8')) as {
+      docs: Record<string, { origin: string; archivedPath: string; localChanged: boolean }>
+    }
+    expect(tombstones.docs.doc1).toMatchObject({
+      origin: 'rm-command',
+      archivedPath: result.archivedPath,
+      localChanged: true,
+    })
+  })
+
+  it('supports delete as an alias', async () => {
+    const dir = pulledDir()
+    const api = rmApi()
+    const h = harness(dir, api)
+
+    await h.run(['delete', 'doc.md'])
+
+    expect(api.deleteDoc).toHaveBeenCalledWith('doc1')
+    expect(h.lines.join('\n')).toContain('deleted doc.md on the server')
+  })
+
+  it('refuses to delete when the remote changed since the local base', async () => {
+    const dir = pulledDir()
+    writeFileSync(join(dir, 'doc.md'), '# Title\n\nlocal notes\n')
+    const api = rmApi({
+      getContent: vi.fn(async () => ({ text: '# Title\n\nremote notes\n', versionId: 'v2', baseHash: null })),
+    })
+    const h = harness(dir, api)
+
+    await expect(h.run(['rm', 'doc.md'])).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(CliError)
+      expect((error as CliError).exitCode).toBe(1)
+      expect((error as CliError).message).toContain('remote changed since your base')
+      return true
+    })
+
+    expect(api.deleteDoc).not.toHaveBeenCalled()
+    expect(readFileSync(join(dir, 'doc.md'), 'utf8')).toBe('# Title\n\nlocal notes\n')
+    expect(existsSync(join(dir, '.glyphdown', 'doc1', 'meta.json'))).toBe(true)
+    expect(existsSync(join(dir, '.glyphdown', 'trash'))).toBe(false)
+  })
+
+  it('allows forced deletes when the remote changed since the local base', async () => {
+    const dir = pulledDir()
+    const api = rmApi({
+      getContent: vi.fn(async () => ({ text: '# Title\n\nremote notes\n', versionId: 'v2', baseHash: null })),
+    })
+    const h = harness(dir, api)
+
+    await h.run(['rm', 'doc.md', '--force'])
+
+    expect(api.deleteDoc).toHaveBeenCalledWith('doc1')
+    expect(existsSync(join(dir, 'doc.md'))).toBe(false)
+    expect(existsSync(join(dir, '.glyphdown', 'doc1', 'meta.json'))).toBe(false)
+  })
+
+  it('restores the local file and keeps active metadata if the server delete fails', async () => {
+    const dir = pulledDir()
+    writeFileSync(join(dir, 'doc.md'), '# Title\n\nlocal notes\n')
+    const api = rmApi({
+      deleteDoc: vi.fn(async () => {
+        throw new CliError(1, 'forbidden')
+      }),
+    })
+    const h = harness(dir, api)
+
+    await expect(h.run(['rm', 'doc.md'])).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(CliError)
+      expect((error as CliError).message).toContain('forbidden')
+      return true
+    })
+
+    expect(readFileSync(join(dir, 'doc.md'), 'utf8')).toBe('# Title\n\nlocal notes\n')
+    expect(existsSync(join(dir, '.glyphdown', 'doc1', 'meta.json'))).toBe(true)
+    expect(existsSync(join(dir, '.glyphdown', 'tombstones.json'))).toBe(false)
+  })
+})
 
 describe('glyphdown list', () => {
   it('prints docs as JSON with --json', async () => {

@@ -196,6 +196,12 @@ export function fetchFor(state: FakeServer): typeof fetch {
       if (!doc) return jsonResponse({ error: 'not-found' }, 404)
       return jsonResponse(doc.meta)
     }
+    if (method === 'DELETE' && docMatch) {
+      const doc = state.docs.get(docMatch[1]!)
+      if (!doc) return jsonResponse({ error: 'not-found' }, 404)
+      state.docs.delete(doc.meta.id)
+      return jsonResponse({ ok: true })
+    }
     if (method === 'PATCH' && docMatch) {
       const doc = state.docs.get(docMatch[1]!)
       if (!doc) return jsonResponse({ error: 'not-found' }, 404)

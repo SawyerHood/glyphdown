@@ -260,6 +260,26 @@ function parseResults(lines: string[]): Map<string, SyncDocResult> {
 }
 
 describe('glyphdown sync', () => {
+  it('does not re-pull a doc deleted through glyphdown rm because active metadata is removed', async () => {
+    const state = server({ folders: [folder('f1', 'Specs')] })
+    state.docs.set('d1', serverDoc('d1', 'Doc', 'text\n', 'f1'))
+
+    const dir = tmp()
+    track(dir, 'doc.md', 'd1', 'text\n')
+    writeFolderConfig(dir, { folderId: 'f1', folderName: 'Specs', serverUrl: SERVER })
+
+    const h = harness(dir, state)
+    await h.run(['rm', 'doc.md', '--json'])
+    expect(state.docs.has('d1')).toBe(false)
+    expect(existsSync(join(dir, 'doc.md'))).toBe(false)
+    expect(existsSync(join(dir, '.glyphdown', 'd1', 'meta.json'))).toBe(false)
+
+    h.lines.length = 0
+    await h.run(['sync', '--json'])
+    expect(JSON.parse(h.lines.join('\n'))).toEqual([])
+    expect(existsSync(join(dir, 'doc.md'))).toBe(false)
+  })
+
   it('runs the full decision matrix: none/local/remote/both/new/remote-gone', async () => {
     const state = server({ folders: [folder('f1', 'Specs')] })
     state.docs.set('d-none', serverDoc('d-none', 'None', 'unchanged\n', 'f1'))

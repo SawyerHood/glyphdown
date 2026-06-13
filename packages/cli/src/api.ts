@@ -71,6 +71,8 @@ export interface Api {
    * CliError with status 409).
    */
   renameDoc(docId: string, filename: string): Promise<DocMeta>
+  /** DELETE /api/docs/:id — owner-only soft delete. */
+  deleteDoc(docId: string): Promise<void>
   listFolders(): Promise<FolderMeta[]>
   getFolder(folderId: string): Promise<FolderMeta>
   /** POST /api/folders — parent must be caller-owned; depth ≤ MAX_FOLDER_DEPTH. */
@@ -202,6 +204,10 @@ export function createApi(opts: ApiOptions): Api {
 
     renameDoc(docId, filename) {
       return requestJson<DocMeta>('PATCH', `/api/docs/${encodeURIComponent(docId)}`, { filename })
+    },
+
+    async deleteDoc(docId) {
+      await requestJson<unknown>('DELETE', `/api/docs/${encodeURIComponent(docId)}`)
     },
 
     async listFolders() {
