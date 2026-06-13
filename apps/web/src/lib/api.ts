@@ -7,6 +7,7 @@ import type {
   FolderListingResponse,
   FolderMeta,
   Principal,
+  PushResponse,
   Role,
   SearchResult,
   SuggestionRecord,
@@ -14,6 +15,7 @@ import type {
   VaultMeta,
   VersionMeta,
 } from '@glyphdown/protocol'
+import { normalizeEol } from '@glyphdown/core'
 
 /**
  * Typed client for the Worker's /api surface (see @glyphdown/protocol and
@@ -554,3 +556,34 @@ export const restoreVersion = (docId: string, versionId: string) =>
 
 export const getDocContent = (docId: string, share?: string) =>
   request<string>(doc(docId, '/content?view=working'), { share })
+
+/** Replace a doc's working text through the same merge-aware push endpoint the CLI uses. */
+export async function pushDocContent(docId: string, newText: string): Promise<Extract<PushResponse, { ok: true }>> {
+  const baseText = normalizeEol(await getDocContent(docId))
+  const body = {
+    newText: normalizeEol(newText),
+    baseHash: await sha256Hex(baseText),
+    baseText,
+  }
+  const res = await fetch(doc(docId, '/push'), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify(body),
+  })
+  const text = await res.text()
+  let data: PushResponse | null = null
+  try {
+    data = JSON.parse(text) as PushResponse
+  } catch {
+    // non-JSON error body
+  }
+  if (data?.ok === true) return data
+  if (data?.ok === false) throw new ApiError(res.status, data.reason)
+  throw new ApiError(res.status, `http-${res.status}`)
+}
+
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
