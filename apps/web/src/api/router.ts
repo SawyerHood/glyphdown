@@ -4,6 +4,7 @@ import { and, desc, eq, inArray, isNull, ne } from 'drizzle-orm'
 import {
   HEADER_ASSET,
   HEADER_ASSET_VERSION,
+  ROLES,
   assetKindForContentType,
   docFilenameStem,
   roleAtLeast,
@@ -20,7 +21,7 @@ import {
 import { HEADER_COMMENT_AUTHOR } from '@glyphdown/sync'
 import { asAppEnv } from '../env.ts'
 import { createDb, type Db } from '../db/client.ts'
-import { agents, docMembers, docs, folderMembers, folders, notifications, shareLinks, user, userPrefs } from '../db/schema.ts'
+import { agents, assets, docMembers, docs, folderMembers, folders, notifications, shareLinks, user, userPrefs } from '../db/schema.ts'
 import { type AuthContext, resolvePrincipal, sha256Hex, shareTokenFrom, trustedHeaders } from './auth.ts'
 import { handleAdminFeedback, handleAdminStats } from './admin.ts'
 import { handleFeedbackPost } from './feedback.ts'
@@ -29,6 +30,7 @@ import type { EmailEnv } from '../email.ts'
 import { captureServerEvent, type AnalyticsServerEnv } from '../analytics-server.ts'
 import {
   accessibleDocs,
+  assetShareLinkRole,
   effectiveUserId,
   fetchAncestorChain,
   fetchFolderSubtrees,
@@ -41,6 +43,7 @@ import {
 } from './roles.ts'
 import { MAX_FOLDER_DEPTH, planFolderDelete, propagateFolderRoles, validateMove } from './folder-tree.ts'
 import {
+  assetMeta,
   assetScopeFor,
   fallbackDocIdsFor,
   handleDocAssets,
@@ -500,7 +503,7 @@ async function handleShareLinks(
   request: Request,
   subPath: string,
   auth: AuthContext,
-  targetType: 'doc' | 'folder',
+  targetType: 'doc' | 'folder' | 'asset',
   targetId: string,
 ): Promise<Response> {
   if (auth.role !== 'owner') return json({ error: 'forbidden' }, 403)
@@ -521,6 +524,12 @@ async function handleShareLinks(
       const payload = await readJson<{ role?: unknown }>(request)
       const role = grantableRole(payload?.role)
       if (!role) return json({ error: 'bad-role' }, 400)
+      // Per-file (asset) links are view/comment only — a static HTML file has
+      // no suggest/edit surface, so reject the higher roles server-side (not
+      // just in the dialog). Doc/folder links keep the full grantable range.
+      if (targetType === 'asset' && role !== 'viewer' && role !== 'commenter') {
+        return json({ error: 'bad-role' }, 400)
+      }
       const token = randomToken()
       const createdAt = Date.now()
       await db.insert(shareLinks).values({
@@ -553,7 +562,11 @@ async function handleShareLinks(
     // visitors are identifiable as link-borne (the DO can't check D1, and the
     // Worker can't enumerate which signed-in sockets used the token) — those
     // signed-in sessions are dropped at their next upgrade/REST call instead.
-    await recheckDocConnections(db, targetType, targetId, auth, ['anonymous'])
+    // Asset links carry no live WebSocket (asset comments are REST-polled, and
+    // every poll re-validates the token), so there is nothing to recheck.
+    if (targetType !== 'asset') {
+      await recheckDocConnections(db, targetType, targetId, auth, ['anonymous'])
+    }
     return json({ ok: true })
   }
   return json({ error: 'not-found' }, 404)
@@ -697,6 +710,23 @@ async function handleFolders(db: Db, request: Request, url: URL): Promise<Respon
     return folderListing(db, listingMatch[1]!, principal, shareTokenFrom(url, request))
   }
 
+  // Per-file asset share-link CRUD (owner-only). This sits ABOVE the shared
+  // GET asset surface below — otherwise a GET /share-links would be swallowed
+  // by `sharedAssetMatch` and routed to the read path. Auth/owner gating lives
+  // inside handleAssetShareLinks.
+  const assetShareLinkMatch = url.pathname.match(
+    /^\/api\/folders\/([^/]+)\/assets\/([^/]+)\/share-links(\/[^/]+)?$/,
+  )
+  if (assetShareLinkMatch) {
+    return handleAssetShareLinks(
+      db,
+      request,
+      assetShareLinkMatch[1]!,
+      safeDecode(assetShareLinkMatch[2]!),
+      assetShareLinkMatch[3] ?? '',
+    )
+  }
+
   // Folder share-link landing pages need their assets before the visitor has
   // an authenticated session. Only the read surface rides share tokens here;
   // mutations continue through the authenticated route below.
@@ -837,16 +867,50 @@ async function folderAssetRead(
 
   const folder = (await db.select().from(folders).where(eq(folders.id, folderId)).limit(1))[0]
   if (!folder) return unauthorized()
-  const role = maxRole(
+  let role = maxRole(
     await resolveFolderRole(db, folder, principal),
     await folderShareLinkRole(db, folder.id, principal, shareToken),
   )
+  // No folder-level access? An ASSET-scoped token still grants access to ITS
+  // single asset (raw read, commenting-view, versions, comments) addressed by
+  // filename in the path — never the folder listing (a tokenless /assets list
+  // path carries no filename, so it stays denied and cannot leak siblings).
+  let expectedAssetId: string | undefined
+  if (role === null && shareToken) {
+    const filename = assetFilenameFromSubPath(subPath)
+    if (filename !== null) {
+      const fallbackIds = await fallbackDocIdsFor(db, folder.id)
+      const row = await resolveAssetRow(db, { kind: 'folder', id: folder.id }, filename, fallbackIds)
+      if (row) {
+        const assetRole = await assetShareLinkRole(db, row.id, principal, shareToken)
+        if (assetRole !== null) {
+          role = maxRole(role, assetRole)
+          // Pin the served asset to the EXACT id the token authorized so a
+          // concurrent same-filename replacement (delete + re-upload → new id)
+          // can't swap a different asset under the authorized read.
+          expectedAssetId = row.id
+        }
+      }
+    }
+  }
   if (role === null) return unauthorized()
 
-  return handleFolderAssets(db, asAppEnv(env).ASSETS, request, url, folder.id, subPath, {
-    principal: principal ?? { id: 'anonymous', type: 'user', name: 'Anonymous' },
-    role,
-  })
+  return handleFolderAssets(
+    db,
+    asAppEnv(env).ASSETS,
+    request,
+    url,
+    folder.id,
+    subPath,
+    { principal: principal ?? { id: 'anonymous', type: 'user', name: 'Anonymous' }, role },
+    expectedAssetId,
+  )
+}
+
+/** Filename addressed by a `/assets/<filename>[/...]` sub-path, else null (a bare `/assets` list has none). */
+function assetFilenameFromSubPath(subPath: string): string | null {
+  const match = subPath.match(/^\/assets\/([^/]+)(?:\/.*)?$/)
+  return match ? safeDecode(match[1]!) : null
 }
 
 async function handleDocAssetComments(
@@ -895,10 +959,16 @@ async function handleFolderAssetComments(
     (await db.select().from(folders).where(eq(folders.id, folderId)).limit(1))[0]
   if (!folder) return unauthorized()
 
-  const role = maxRole(
+  const fallbackIds = await fallbackDocIdsFor(db, folder.id)
+  const row = await resolveAssetRow(db, { kind: 'folder', id: folder.id }, parts.filename, fallbackIds)
+
+  let role = maxRole(
     await resolveFolderRole(db, folder, principal),
     await folderShareLinkRole(db, folder.id, principal, shareToken),
   )
+  // An asset-scoped token grants comment access to its asset only (read for
+  // anonymous via a view link; commenting needs sign-in, enforced below).
+  if (row && shareToken) role = maxRole(role, await assetShareLinkRole(db, row.id, principal, shareToken))
   if (role === null) return unauthorized()
   if (request.method !== 'GET' && !principal) return json({ error: 'unauthenticated' }, 401)
 
@@ -906,8 +976,6 @@ async function handleFolderAssetComments(
     principal: principal ?? { id: 'anonymous', type: 'user', name: 'Anonymous' },
     role,
   }
-  const fallbackIds = await fallbackDocIdsFor(db, folder.id)
-  const row = await resolveAssetRow(db, { kind: 'folder', id: folder.id }, parts.filename, fallbackIds)
   if (!row) return json({ error: 'not-found' }, 404)
   return handleAssetCommentProxy(
     db,
@@ -996,11 +1064,30 @@ async function folderListing(
   const folder = (await db.select().from(folders).where(eq(folders.id, folderId)).limit(1))[0]
   if (!folder) return unauthorized()
 
-  const role = maxRole(
+  const folderRole = maxRole(
     await resolveFolderRole(db, folder, principal),
     await folderShareLinkRole(db, folder.id, principal, shareToken),
   )
-  if (role === null) return unauthorized()
+
+  // A per-file (asset) token addresses ONE asset. Answer with a RESTRICTED
+  // listing exposing only that asset — never other assets, docs, or subfolders
+  // — when it applies: the caller has no folder access (the landing read for a
+  // per-file link), OR the token grants a HIGHER role on its asset than the
+  // caller's folder role. The listing role is the caller's effective role on
+  // that asset (max of folder + token) so the UI reflects the real capability
+  // — e.g. a folder viewer following a commenter file link can actually comment
+  // — without ever bumping the folder-wide role or leaking the rest of it.
+  const target = await resolveAssetShareTarget(db, folder, principal, shareToken)
+  if (target && (folderRole === null || ROLES.indexOf(target.role) > ROLES.indexOf(folderRole))) {
+    const assetRole = maxRole(folderRole, target.role) ?? target.role
+    const listingFolder: FolderListingFolderMeta = {
+      ...folderMeta(folder, assetRole),
+      assets: [assetMeta(target.row)],
+    }
+    return json({ folder: listingFolder, folders: [], docs: [] } satisfies FolderListingResponse)
+  }
+  if (folderRole === null) return unauthorized()
+  const role = folderRole
 
   const subtree = await fetchFolderSubtrees(db, [folder.id])
   const docRows = await db
@@ -1032,6 +1119,69 @@ async function folderListing(
     docs: docRows.map((d) => docMeta(d, role)),
   }
   return json(body)
+}
+
+/**
+ * Resolve a per-file (asset) share token against a folder: the asset row it
+ * targets plus the role it confers, or null. Null unless the token is an
+ * unrevoked asset link that confers a role (anonymous capped at viewer; the
+ * role is capped at commenter — see assetShareLinkRole) and whose asset
+ * actually lives in this folder (a folder-scoped row, or a legacy doc-scoped
+ * row homed here). The folder-membership check is what stops a token from
+ * listing a sibling/child/unrelated folder.
+ */
+async function resolveAssetShareTarget(
+  db: Db,
+  folder: typeof folders.$inferSelect,
+  principal: Principal | null,
+  shareToken: string | null,
+): Promise<{ row: AssetRow; role: Role } | null> {
+  if (!shareToken) return null
+  const link = (await db.select().from(shareLinks).where(eq(shareLinks.token, shareToken)).limit(1))[0]
+  if (!link || link.revokedAt !== null || link.targetType !== 'asset') return null
+  const role = await assetShareLinkRole(db, link.targetId, principal, shareToken)
+  if (role === null) return null
+
+  const row = (await db.select().from(assets).where(eq(assets.id, link.targetId)).limit(1))[0]
+  if (!row) return null
+  const belongsToFolder =
+    row.folderId === folder.id ||
+    (row.folderId === null &&
+      row.docId !== null &&
+      (await fallbackDocIdsFor(db, folder.id)).includes(row.docId))
+  if (!belongsToFolder) return null
+
+  return { row, role }
+}
+
+/**
+ * Per-file asset share-link CRUD: GET/POST /api/folders/:id/assets/:filename/
+ * share-links and DELETE …/<token>. Owner-only (the asset's owner is the folder
+ * owner), mirroring the doc/folder share-link gating — handleShareLinks does
+ * the actual list/create/revoke against targetType='asset', targetId=asset id.
+ * Non-members get 404 (no existence leak); non-owner members get 403.
+ */
+async function handleAssetShareLinks(
+  db: Db,
+  request: Request,
+  folderId: string,
+  filename: string,
+  tokenPart: string,
+): Promise<Response> {
+  const principal = await resolvePrincipal(request, db)
+  if (!principal) return json({ error: 'unauthenticated' }, 401)
+  const folder = (await db.select().from(folders).where(eq(folders.id, folderId)).limit(1))[0]
+  if (!folder) return json({ error: 'not-found' }, 404)
+  const folderRole = await resolveFolderRole(db, folder, principal)
+  if (folderRole === null) return json({ error: 'not-found' }, 404)
+  if (folderRole !== 'owner') return json({ error: 'forbidden' }, 403)
+
+  const fallbackIds = await fallbackDocIdsFor(db, folder.id)
+  const row = await resolveAssetRow(db, { kind: 'folder', id: folder.id }, filename, fallbackIds)
+  if (!row) return json({ error: 'not-found' }, 404)
+
+  const auth: AuthContext = { principal, role: 'owner' }
+  return handleShareLinks(db, request, `/share-links${tokenPart}`, auth, 'asset', row.id)
 }
 
 /**

@@ -217,6 +217,7 @@ describe('event registry', () => {
       'doc_opened',
       'doc_shared',
       'vault_shared',
+      'asset_shared',
       'invite_sent',
       'invite_accepted',
       'suggestion_created',

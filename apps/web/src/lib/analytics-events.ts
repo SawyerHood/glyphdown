@@ -26,6 +26,8 @@ export interface AnalyticsEvents {
   doc_shared: { docId: string; role: string; via: 'share-link' }
   /** A vault share link was created (copies the /f/:folderId landing URL). */
   vault_shared: { role: string; via: 'share-link' }
+  /** A per-file (HTML asset) share link was created (copies the /f/:id/file/:name URL). */
+  asset_shared: { folderId: string; role: string; via: 'share-link' }
   /** Email invite created. status 'added' = recipient already had an account. */
   invite_sent: { targetType: 'doc' | 'folder'; role: string; status: 'added' | 'invited' }
   invite_accepted: { targetType: 'doc' | 'folder'; role: string }
@@ -54,6 +56,7 @@ export const ANALYTICS_EVENT_NAMES = [
   'doc_opened',
   'doc_shared',
   'vault_shared',
+  'asset_shared',
   'invite_sent',
   'invite_accepted',
   'suggestion_created',

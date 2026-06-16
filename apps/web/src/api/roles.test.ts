@@ -4,6 +4,7 @@ import { drizzle } from 'drizzle-orm/better-sqlite3'
 import type { Principal } from '@glyphdown/protocol'
 import * as schema from '../db/schema.ts'
 import {
+  assetShareLinkRole,
   computeDocRole,
   effectiveUserId,
   fetchAncestorChain,
@@ -406,5 +407,64 @@ describe('resolveDocAccess (in-memory sqlite, nested folders)', () => {
     expect(await resolveFolderRole(db, leaf, { id: 'carol', type: 'user', name: 'C' })).toBe('suggester')
     expect(await resolveFolderRole(db, { id: 'root-A', ownerUserId: 'owner-1' }, { id: 'carol', type: 'user', name: 'C' })).toBeNull()
     expect(await resolveFolderRole(db, leaf, null)).toBeNull()
+  })
+})
+
+describe('assetShareLinkRole (per-file/asset share tokens)', () => {
+  /**
+   * Three live links: a viewer + a commenter link on asset-A, plus a viewer
+   * link on asset-B; one revoked link on asset-A; and a folder link (wrong
+   * target type) on folder-1.
+   */
+  function setup(): Db {
+    const sqlite = new Database(':memory:')
+    sqlite.exec(`
+      CREATE TABLE share_links (token TEXT PRIMARY KEY, target_type TEXT NOT NULL, target_id TEXT NOT NULL,
+        role TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, revoked_at INTEGER);
+    `)
+    const link = sqlite.prepare('INSERT INTO share_links VALUES (?, ?, ?, ?, ?, ?, ?)')
+    const now = Date.now()
+    link.run('tok-a-view', 'asset', 'asset-A', 'viewer', 'owner-1', now, null)
+    link.run('tok-a-comment', 'asset', 'asset-A', 'commenter', 'owner-1', now, null)
+    link.run('tok-b-view', 'asset', 'asset-B', 'viewer', 'owner-1', now, null)
+    link.run('tok-a-dead', 'asset', 'asset-A', 'commenter', 'owner-1', now, 999)
+    link.run('tok-folder', 'folder', 'folder-1', 'editor', 'owner-1', now, null)
+    // A defensive case: a stored editor asset link (creation now rejects these).
+    link.run('tok-a-edit', 'asset', 'asset-A', 'editor', 'owner-1', now, null)
+    return drizzle(sqlite, { schema }) as unknown as Db
+  }
+
+  it('grants the signed-in caller the link role for its asset, nothing for another asset', async () => {
+    const db = setup()
+    expect(await assetShareLinkRole(db, 'asset-A', alice, 'tok-a-comment')).toBe('commenter')
+    // A token for asset A confers nothing on asset B.
+    expect(await assetShareLinkRole(db, 'asset-B', alice, 'tok-a-comment')).toBeNull()
+    expect(await assetShareLinkRole(db, 'asset-A', alice, 'tok-b-view')).toBeNull()
+  })
+
+  it('caps anonymous callers at viewer, and only via a view link', async () => {
+    const db = setup()
+    expect(await assetShareLinkRole(db, 'asset-A', null, 'tok-a-view')).toBe('viewer')
+    // Anonymous + comment link → nothing (comment-and-above needs sign-in).
+    expect(await assetShareLinkRole(db, 'asset-A', null, 'tok-a-comment')).toBeNull()
+    // Signed-in commenter link still grants commenter.
+    expect(await assetShareLinkRole(db, 'asset-A', alice, 'tok-a-view')).toBe('viewer')
+  })
+
+  it('returns null for revoked tokens, folder-type tokens, missing tokens, and no token', async () => {
+    const db = setup()
+    expect(await assetShareLinkRole(db, 'asset-A', alice, 'tok-a-dead')).toBeNull()
+    // A folder link is not an asset link, even pointed at a matching id.
+    expect(await assetShareLinkRole(db, 'folder-1', alice, 'tok-folder')).toBeNull()
+    expect(await assetShareLinkRole(db, 'asset-A', alice, 'tok-missing')).toBeNull()
+    expect(await assetShareLinkRole(db, 'asset-A', alice, null)).toBeNull()
+  })
+
+  it('caps a stored suggest/edit role at commenter (asset links are view/comment only)', async () => {
+    const db = setup()
+    // Signed-in: an editor asset link confers at most commenter on a file.
+    expect(await assetShareLinkRole(db, 'asset-A', alice, 'tok-a-edit')).toBe('commenter')
+    // Anonymous: capped to commenter then denied (not a view link).
+    expect(await assetShareLinkRole(db, 'asset-A', null, 'tok-a-edit')).toBeNull()
   })
 })

@@ -256,7 +256,9 @@ export const shareLinks = sqliteTable(
   'share_links',
   {
     token: text('token').primaryKey(),
-    targetType: text('target_type', { enum: ['doc', 'folder'] }).notNull(),
+    // Type-only enum over a plain TEXT column: 'asset' shares a single file
+    // asset (target_id = assets.id). No migration — the column already exists.
+    targetType: text('target_type', { enum: ['doc', 'folder', 'asset'] }).notNull(),
     targetId: text('target_id').notNull(),
     role: text('role', { enum: MEMBER_ROLES }).notNull(),
     createdBy: text('created_by').notNull(),

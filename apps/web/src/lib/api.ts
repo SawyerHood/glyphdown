@@ -297,6 +297,27 @@ export const createFolderShareLink = (folderId: string, role: Role) =>
 export const revokeFolderShareLink = (folderId: string, token: string) =>
   request<{ ok: true }>(folderPath(folderId, `/share-links/${encodeURIComponent(token)}`), { method: 'DELETE' })
 
+// Per-file (asset) share links: share a single HTML file directly. A recipient
+// opening the file URL with the token sees ONLY that file (view/comment per the
+// link's role), not the rest of the folder. Owner-only CRUD, same shape as doc/
+// folder links. The copyable URL is the standalone viewer:
+// /f/<folderId>/file/<filename>?share=<token>.
+
+export const listAssetShareLinks = (folderId: string, filename: string) =>
+  request<{ shareLinks: ShareLinkInfo[] }>(`${folderAsset(folderId, filename)}/share-links`).then((r) => r.shareLinks)
+
+export const createAssetShareLink = (folderId: string, filename: string, role: Role) =>
+  request<ShareLinkInfo>(`${folderAsset(folderId, filename)}/share-links`, { method: 'POST', body: { role } })
+
+export const revokeAssetShareLink = (folderId: string, filename: string, token: string) =>
+  request<{ ok: true }>(`${folderAsset(folderId, filename)}/share-links/${encodeURIComponent(token)}`, {
+    method: 'DELETE',
+  })
+
+/** The copyable per-file share URL — the standalone HTML viewer carrying the token. */
+export const assetShareUrl = (folderId: string, filename: string, token: string): string =>
+  `${window.location.origin}/f/${encodeURIComponent(folderId)}/file/${encodeURIComponent(filename)}?share=${encodeURIComponent(token)}`
+
 // ---------------------------------------------------------------------------
 // Email invites (work for non-users too — they get an /invite/<token> email)
 // ---------------------------------------------------------------------------
