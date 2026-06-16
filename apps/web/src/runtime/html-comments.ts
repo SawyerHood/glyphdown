@@ -13,7 +13,7 @@ export type HtmlCommentsFrameMessage =
 
 export type HtmlCommentsParentMessage =
   | { t: 'gd:set-mode'; version: 1; nonce: string; mode: 'browse' | 'pick' }
-  | { t: 'gd:set-markers'; version: 1; nonce: string; markers: Array<{ id: string; anchor: NodeAnchor }> }
+  | { t: 'gd:set-markers'; version: 1; nonce: string; markers: Array<{ id: string; anchor: NodeAnchor; number?: number }> }
   | { t: 'gd:focus-marker'; version: 1; nonce: string; id: string }
 
 // Bounds on untrusted iframe → parent messages. The injected runtime shares the
@@ -189,10 +189,12 @@ export function installHtmlCommentsRuntime(nonce: string): void {
     style.textContent = `
       .layer { position: fixed; inset: 0; pointer-events: none; }
       .${markerClass} {
-        position: fixed; box-sizing: border-box; width: 18px; height: 18px; padding: 0; margin: 0;
+        position: fixed; box-sizing: border-box; width: 21px; height: 21px; padding: 0; margin: 0;
+        display: grid; place-items: center; line-height: 1; color: #fff;
+        font: 700 11px/1 ui-sans-serif, system-ui, -apple-system, sans-serif;
         border: 2px solid #fff; border-radius: 999px; background: #2563eb;
         box-shadow: 0 2px 8px rgba(15, 23, 42, 0.24); cursor: pointer; pointer-events: auto;
-        transform: translate(-50%, -50%); font: inherit;
+        transform: translate(-50%, -50%);
       }
       .${markerClass}:focus-visible { outline: 2px solid #0f766e; outline-offset: 2px; }
     `
@@ -393,7 +395,7 @@ export function installHtmlCommentsRuntime(nonce: string): void {
     })
   }
 
-  function setMarkers(next: Array<{ id: string; anchor: RuntimeAnchor }>): void {
+  function setMarkers(next: Array<{ id: string; anchor: RuntimeAnchor; number?: number }>): void {
     for (const marker of markers.values()) {
       marker.element?.classList.remove(anchoredClass)
       marker.button.remove()
@@ -411,7 +413,8 @@ export function installHtmlCommentsRuntime(nonce: string): void {
       const button = document.createElement('button')
       button.type = 'button'
       button.className = markerClass
-      button.setAttribute('aria-label', `Comment on ${input.anchor.label}`)
+      if (typeof input.number === 'number') button.textContent = String(input.number)
+      button.setAttribute('aria-label', `Comment ${input.number ?? ''} on ${input.anchor.label}`)
       button.addEventListener('click', (event) => {
         event.preventDefault()
         event.stopPropagation()

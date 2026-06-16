@@ -186,8 +186,8 @@ describe('folder HTML viewer route', () => {
     await waitFor(() => expect(screen.getByTitle('page.html')).toBeTruthy())
     await waitFor(() => expect(screen.getByTitle('Comments').textContent).toContain('1'))
 
-    fireEvent.click(screen.getByTitle('Comments'))
-
+    // The comments panel is part of the desktop layout (matchMedia matches:false),
+    // so it is open by default — no toggle click needed.
     expect(await screen.findByText('Check this total')).toBeTruthy()
     expect(screen.getByText('h1 "Quarterly revenue"')).toBeTruthy()
   })

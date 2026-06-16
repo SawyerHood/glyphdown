@@ -18,6 +18,8 @@ export interface CommentAnchorPreview {
 export interface CommentThreadDescriptor {
   bucket: 'anchored' | 'document' | 'orphaned'
   sortKey?: number
+  /** 1..N badge that lines up with the in-document marker bubble. */
+  markerNumber?: number
   preview?: CommentAnchorPreview
 }
 
@@ -88,7 +90,12 @@ export default function CommentThreadList<TPending>({
     const resolved: ThreadModel[] = []
     for (const comment of comments) {
       const descriptor = describeComment(comment)
-      const model = { comment, preview: descriptor.preview, sortKey: descriptor.sortKey ?? Number.MAX_SAFE_INTEGER }
+      const model = {
+        comment,
+        preview: descriptor.preview,
+        sortKey: descriptor.sortKey ?? Number.MAX_SAFE_INTEGER,
+        markerNumber: descriptor.markerNumber,
+      }
       if (comment.resolved) {
         resolved.push(model)
         continue
@@ -212,20 +219,27 @@ export default function CommentThreadList<TPending>({
 
       {comments.length === 0 && !pending ? <EmptyState title="No comments yet" hint={emptyHint} /> : null}
 
-      {grouped.anchored.map((model) => (
-        <Thread
-          key={model.comment.id}
-          comment={model.comment}
-          me={me}
-          members={members}
-          nameFor={nameFor}
-          active={model.comment.id === activeCommentId}
-          canComment={canComment}
-          onSelect={() => onSelect(model.comment)}
-          actions={actions}
-          preview={model.preview}
-        />
-      ))}
+      {grouped.anchored.length > 0 ? (
+        <>
+          <h3 className="island-kicker m-0 mt-2">On elements</h3>
+          {grouped.anchored.map((model) => (
+            <Thread
+              key={model.comment.id}
+              comment={model.comment}
+              me={me}
+              members={members}
+              nameFor={nameFor}
+              active={model.comment.id === activeCommentId}
+              canComment={canComment}
+              onSelect={() => onSelect(model.comment)}
+              actions={actions}
+              preview={model.preview}
+              kind="node"
+              markerNumber={model.markerNumber}
+            />
+          ))}
+        </>
+      ) : null}
 
       {grouped.document.length > 0 ? (
         <>
@@ -242,6 +256,7 @@ export default function CommentThreadList<TPending>({
               onSelect={() => onSelect(model.comment)}
               actions={actions}
               preview={model.preview}
+              kind="document"
             />
           ))}
         </>
@@ -265,6 +280,7 @@ export default function CommentThreadList<TPending>({
               onSelect={() => onSelect(model.comment)}
               actions={actions}
               preview={model.preview}
+              kind="orphaned"
               orphaned
               canReattach={
                 canComment &&
@@ -299,6 +315,7 @@ export default function CommentThreadList<TPending>({
                   onSelect={() => onSelect(model.comment)}
                   actions={actions}
                   preview={model.preview}
+                  kind={model.preview?.label ? 'node' : 'document'}
                   resolved
                 />
               ))
@@ -312,6 +329,7 @@ export default function CommentThreadList<TPending>({
 interface ThreadModel {
   comment: Comment
   sortKey: number
+  markerNumber?: number
   preview?: CommentAnchorPreview
 }
 
@@ -330,6 +348,8 @@ function Thread({
   onSelect,
   actions,
   preview,
+  kind,
+  markerNumber,
   orphaned,
   resolved,
   canReattach,
@@ -349,6 +369,8 @@ function Thread({
     reattach?: (comment: Comment) => Promise<void>
   }
   preview?: CommentAnchorPreview
+  kind?: 'node' | 'document' | 'orphaned'
+  markerNumber?: number
   orphaned?: boolean
   resolved?: boolean
   canReattach?: boolean
@@ -380,11 +402,18 @@ function Thread({
       } ${resolved ? 'opacity-70' : ''}`}
       onClick={onSelect}
     >
-      {preview ? <AnchorPreview preview={{ ...preview, orphaned: orphaned || preview.orphaned }} /> : null}
+      {kind !== 'document' && (markerNumber !== undefined || preview?.label) ? (
+        <div className="mb-1.5 flex items-center gap-1.5">
+          {markerNumber !== undefined ? <MarkerBadge n={markerNumber} /> : null}
+          {preview?.label ? <ElementChip label={preview.label} orphaned={orphaned || preview.orphaned} /> : null}
+        </div>
+      ) : null}
+      {preview?.quote ? <QuotePreview quote={preview.quote} orphaned={orphaned || preview.orphaned} /> : null}
 
-      <div className="mb-1 flex items-baseline gap-2">
+      <div className="mb-1 flex items-center gap-2">
+        <Avatar id={comment.authorId} name={comment.authorName} />
         <span className="text-xs font-semibold text-[var(--ink)]">{comment.authorName}</span>
-        <span className="text-[10px] text-[var(--ink-faint)]">{timeAgo(comment.createdAt)}</span>
+        <span className="ml-auto text-[10px] text-[var(--ink-faint)]">{timeAgo(comment.createdAt)}</span>
       </div>
       <p className="m-0 whitespace-pre-wrap text-sm text-[var(--ink)]">
         {renderMentions(comment.body, nameFor)}
@@ -393,14 +422,17 @@ function Thread({
       <Reactions comment={comment} me={me} canComment={canComment} pickerOpen={pickerOpen} setPickerOpen={setPickerOpen} onReact={(emoji) => void actions.react(comment, emoji)} />
 
       {comment.replies.length > 0 ? (
-        <div className="mt-2 flex flex-col gap-2 border-l border-[var(--line)] pl-2.5">
+        <div className="mt-2 flex flex-col gap-2.5 border-l border-[var(--line)] pl-2.5">
           {comment.replies.map((reply) => (
-            <div key={reply.id}>
-              <div className="flex items-baseline gap-2">
-                <span className="text-xs font-semibold text-[var(--ink)]">{reply.authorName}</span>
-                <span className="text-[10px] text-[var(--ink-faint)]">{timeAgo(reply.createdAt)}</span>
+            <div key={reply.id} className="flex gap-2">
+              <Avatar id={reply.authorId} name={reply.authorName} size={18} />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-baseline gap-2">
+                  <span className="text-xs font-semibold text-[var(--ink)]">{reply.authorName}</span>
+                  <span className="text-[10px] text-[var(--ink-faint)]">{timeAgo(reply.createdAt)}</span>
+                </div>
+                <p className="m-0 whitespace-pre-wrap text-sm text-[var(--ink)]">{renderMentions(reply.body, nameFor)}</p>
               </div>
-              <p className="m-0 whitespace-pre-wrap text-sm text-[var(--ink)]">{renderMentions(reply.body, nameFor)}</p>
             </div>
           ))}
         </div>
@@ -475,6 +507,60 @@ function AnchorPreview({ preview, className = '' }: { preview: CommentAnchorPrev
 
 function truncate(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max)}…` : value
+}
+
+const AVATAR_COLORS = ['#2563eb', '#0f766e', '#7c3aed', '#c2410c', '#be185d', '#0369a1', '#15803d', '#a16207']
+
+/** Initial-in-a-circle avatar; colour is stable per principal id. */
+function Avatar({ id, name, size = 22 }: { id: string; name: string; size?: number }) {
+  const initial = (name.trim()[0] ?? '?').toUpperCase()
+  let hash = 0
+  for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) >>> 0
+  const background = AVATAR_COLORS[hash % AVATAR_COLORS.length]
+  return (
+    <span
+      className="grid shrink-0 place-items-center rounded-full font-bold text-white"
+      style={{ width: size, height: size, fontSize: Math.round(size * 0.45), background }}
+      aria-hidden
+    >
+      {initial}
+    </span>
+  )
+}
+
+/** Numbered badge that matches the in-document marker bubble. */
+function MarkerBadge({ n }: { n: number }) {
+  return (
+    <span className="grid h-[22px] w-[22px] shrink-0 place-items-center rounded-full bg-[var(--accent)] text-[11px] font-bold text-white">
+      {n}
+    </span>
+  )
+}
+
+/** The element a node comment is anchored to, e.g. `button "Export CSV"`. */
+function ElementChip({ label, orphaned }: { label: string; orphaned?: boolean }) {
+  return (
+    <span
+      title={label}
+      className={`truncate rounded-md px-2 py-0.5 font-mono text-[11px] font-semibold ${
+        orphaned ? 'bg-amber-50 text-amber-700 line-through' : 'bg-[var(--accent-soft)] text-[var(--accent)]'
+      }`}
+    >
+      {label}
+    </span>
+  )
+}
+
+function QuotePreview({ quote, orphaned }: { quote: string; orphaned?: boolean }) {
+  return (
+    <p
+      className={`m-0 mb-1.5 truncate border-l-2 pl-2 text-[11px] italic text-[var(--ink-faint)] ${
+        orphaned ? 'border-red-300 line-through' : 'border-[var(--line)]'
+      }`}
+    >
+      “{truncate(quote, 100)}”
+    </p>
+  )
 }
 
 function Reactions({

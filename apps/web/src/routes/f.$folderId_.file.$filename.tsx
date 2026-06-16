@@ -33,7 +33,7 @@ import CommentThreadList, {
 
 type HtmlCommentsParentCommand =
   | { t: 'gd:set-mode'; mode: 'browse' | 'pick' }
-  | { t: 'gd:set-markers'; markers: Array<{ id: string; anchor: NodeAnchor }> }
+  | { t: 'gd:set-markers'; markers: Array<{ id: string; anchor: NodeAnchor; number?: number }> }
   | { t: 'gd:focus-marker'; id: string }
 
 type MarkerResolution = { status: 'anchored' | 'orphaned'; domHint?: number; label?: string }
@@ -177,12 +177,31 @@ export function HtmlAssetViewerChrome({
     [filename, folderId, queryClient, share],
   )
 
+  // Stable 1..N numbering for open, resolvable node comments — shared by the
+  // in-iframe marker bubbles and the sidebar thread badges so they line up.
+  const markerNumbers = useMemo(() => {
+    const map = new Map<string, number>()
+    comments
+      .filter(
+        (c) =>
+          !c.resolved &&
+          c.anchorKind === 'node' &&
+          c.nodeAnchor !== undefined &&
+          c.nodeAnchor.status !== 'orphaned' &&
+          markerResolutions[c.id]?.status !== 'orphaned',
+      )
+      .map((c) => ({ id: c.id, key: markerResolutions[c.id]?.domHint ?? c.nodeAnchor!.domHint, createdAt: c.createdAt }))
+      .sort((a, b) => a.key - b.key || a.createdAt - b.createdAt)
+      .forEach((c, i) => map.set(c.id, i + 1))
+    return map
+  }, [comments, markerResolutions])
+
   const markerPayload = useMemo(
     () =>
       comments
         .filter((comment) => !comment.resolved && comment.anchorKind === 'node' && comment.nodeAnchor !== undefined)
-        .map((comment) => ({ id: comment.id, anchor: comment.nodeAnchor! })),
-    [comments],
+        .map((comment) => ({ id: comment.id, anchor: comment.nodeAnchor!, number: markerNumbers.get(comment.id) })),
+    [comments, markerNumbers],
   )
 
   const postToFrame = useCallback(
@@ -279,6 +298,12 @@ export function HtmlAssetViewerChrome({
     postToFrame({ t: 'gd:set-markers', markers: markerPayload })
   }, [frameReady, markerPayload, postToFrame])
 
+  // On desktop the comments panel is part of the layout (like the mockup); on
+  // mobile it stays a bottom sheet you open on demand.
+  useEffect(() => {
+    if (!isMobile) setSidebarOpen(true)
+  }, [isMobile])
+
   const pendingPreview = useCallback((anchor: NodeAnchor): CommentAnchorPreview => previewForNodeAnchor(anchor), [])
   const analyticsTargetId = asset?.id ?? folderId
 
@@ -289,9 +314,14 @@ export function HtmlAssetViewerChrome({
       const orphaned = comment.nodeAnchor.status === 'orphaned' || runtime?.status === 'orphaned'
       const preview = previewForNodeAnchor(comment.nodeAnchor, runtime, orphaned)
       if (orphaned) return { bucket: 'orphaned', preview }
-      return { bucket: 'anchored', sortKey: runtime?.domHint ?? comment.nodeAnchor.domHint, preview }
+      return {
+        bucket: 'anchored',
+        sortKey: runtime?.domHint ?? comment.nodeAnchor.domHint,
+        markerNumber: markerNumbers.get(comment.id),
+        preview,
+      }
     },
-    [markerResolutions],
+    [markerResolutions, markerNumbers],
   )
 
   const service = useMemo<CommentThreadService<NodeAnchor>>(
