@@ -525,12 +525,53 @@ describe('handleDocAssets', () => {
     const res = await get('pic.png')
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toBe('image/png')
-    expect(res.headers.get('cache-control')).toBe('private, max-age=3600')
+    expect(res.headers.get('cache-control')).toBe('private, no-cache')
     expect(res.headers.get('content-security-policy')).toBeNull()
     expect(res.headers.get('x-content-type-options')).toBeNull()
     expect(res.headers.get('etag')).toBeTruthy()
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(PNG)
     expect((await get('missing.png')).status).toBe(404)
+  })
+
+  it('serves a re-pushed asset fresh and revalidates via ETag (no stale cache)', async () => {
+    const db = setupDb()
+    const { bucket } = fakeBucket()
+    const get = (headers?: Record<string, string>) =>
+      handleDocAssets(
+        db,
+        bucket,
+        new Request('https://x/api/docs/doc-1/assets/page.html', { headers }),
+        new URL('https://x/api/docs/doc-1/assets/page.html'),
+        folderedDoc,
+        { ...editorAuth, role: 'viewer' },
+        '/assets/page.html',
+      )
+
+    const v1 = new TextEncoder().encode('<!doctype html><h1>v1</h1>')
+    await upload(db, bucket, folderedDoc, 'page.html', { contentType: 'text/html', body: v1 })
+    const first = await get()
+    expect(first.status).toBe(200)
+    // No long-lived freshness window: the browser must revalidate every load.
+    expect(first.headers.get('cache-control')).toBe('private, no-cache')
+    const etag1 = first.headers.get('etag')!
+    expect(etag1).toBeTruthy()
+    expect(new Uint8Array(await first.arrayBuffer())).toEqual(v1)
+
+    // A revalidation of the SAME bytes is a cheap 304 (no body).
+    const notModified = await get({ 'if-none-match': etag1 })
+    expect(notModified.status).toBe(304)
+    expect(new Uint8Array(await notModified.arrayBuffer()).byteLength).toBe(0)
+
+    // Re-push (overwrite) new bytes to the SAME url → new ETag, fresh body, and
+    // the old conditional request no longer matches, so it gets a full 200.
+    const v2 = new TextEncoder().encode('<!doctype html><h1>v2 updated</h1>')
+    await upload(db, bucket, folderedDoc, 'page.html', { contentType: 'text/html', body: v2, overwrite: true })
+
+    const stale = await get({ 'if-none-match': etag1 })
+    expect(stale.status).toBe(200)
+    const etag2 = stale.headers.get('etag')!
+    expect(etag2).not.toBe(etag1)
+    expect(new Uint8Array(await stale.arrayBuffer())).toEqual(v2)
   })
 
   it('adds sandbox headers when streaming html assets', async () => {
@@ -548,7 +589,7 @@ describe('handleDocAssets', () => {
     )
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toBe('text/html')
-    expect(res.headers.get('cache-control')).toBe('private, max-age=3600')
+    expect(res.headers.get('cache-control')).toBe('private, no-cache')
     expect(res.headers.get('content-security-policy')).toBe('sandbox allow-scripts')
     expect(res.headers.get('x-content-type-options')).toBe('nosniff')
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(HTML)

@@ -275,7 +275,7 @@ export async function handleDocAssets(
   if (!match) return json({ error: 'not-found' }, 404)
   const filename = safeDecode(match[1]!)
 
-  if (request.method === 'GET') return streamAsset(db, bucket, scope, filename, fallbackIds, url.searchParams.get('version'))
+  if (request.method === 'GET') return streamAsset(db, bucket, scope, filename, fallbackIds, request, url.searchParams.get('version'))
   if (request.method === 'DELETE') {
     if (!roleAtLeast(auth.role, 'editor')) return json({ error: 'forbidden' }, 403)
     return deleteAsset(db, bucket, scope, filename, fallbackIds)
@@ -326,7 +326,7 @@ export async function handleFolderAssets(
   const match = subPath.match(/^\/assets\/([^/]+)$/)
   if (!match) return json({ error: 'not-found' }, 404)
   const filename = safeDecode(match[1]!)
-  if (request.method === 'GET') return streamAsset(db, bucket, scope, filename, fallbackIds, url.searchParams.get('version'))
+  if (request.method === 'GET') return streamAsset(db, bucket, scope, filename, fallbackIds, request, url.searchParams.get('version'))
   if (request.method === 'DELETE') {
     // Same gate as the doc-scoped delete (SPEC §4): editor+ only.
     if (auth === null || !roleAtLeast(auth.role, 'editor')) return json({ error: 'forbidden' }, 403)
@@ -618,7 +618,7 @@ async function handleAssetVersions(
   if (!route.versionId) return json({ error: 'not-found' }, 404)
   if (route.action === 'raw') {
     if (request.method !== 'GET') return json({ error: 'method-not-allowed' }, 405)
-    return streamAssetVersionById(db, bucket, row, route.versionId)
+    return streamAssetVersionById(db, bucket, row, route.versionId, request, true)
   }
 
   if (route.action === 'restore') {
@@ -645,12 +645,19 @@ async function listAssetVersions(db: Db, row: AssetRow): Promise<Response> {
   return json({ versions: versions.map((version) => assetVersionMeta(version, row.currentVersionId)) })
 }
 
-async function streamAssetVersionById(db: Db, bucket: R2Bucket, row: AssetRow, versionId: string): Promise<Response> {
+async function streamAssetVersionById(
+  db: Db,
+  bucket: R2Bucket,
+  row: AssetRow,
+  versionId: string,
+  request: Request,
+  immutable: boolean,
+): Promise<Response> {
   const version = await findAssetVersion(db, row.id, versionId)
   if (!version) return json({ error: 'version-not-found' }, 404)
   const object = await bucket.get(contentObjectKey(version.contentHash))
   if (!object) return json({ error: 'version-bytes-not-found' }, 404)
-  return assetObjectResponse(row.contentType, version.size, version.etag, object)
+  return assetObjectResponse(row.contentType, version.size, version.etag, object, request, immutable)
 }
 
 async function restoreAssetVersion(
@@ -728,17 +735,32 @@ async function versionObject(
   return bucket.get(contentObjectKey(version.contentHash))
 }
 
-function assetObjectResponse(contentType: string, size: number, etag: string, object: R2ObjectBody): Response {
+function assetObjectResponse(
+  contentType: string,
+  size: number,
+  etag: string,
+  object: R2ObjectBody,
+  request: Request,
+  immutable: boolean,
+): Response {
+  const validator = httpEtag(etag)
   const headers = new Headers({
     'content-type': contentType,
-    'content-length': String(size),
-    etag: httpEtag(etag),
-    'cache-control': 'private, max-age=3600',
+    // A specific `?version=<id>` is content-addressed and never changes, so cache
+    // it hard. The current view at the stable filename URL must revalidate so a
+    // re-push is visible without a hard refresh (PR #9); the ETag keeps that cheap
+    // via 304.
+    etag: validator,
+    'cache-control': immutable ? 'private, max-age=31536000, immutable' : 'private, no-cache',
   })
   if (assetKindForContentType(contentType) === 'html') {
     headers.set('content-security-policy', 'sandbox allow-scripts')
     headers.set('x-content-type-options', 'nosniff')
   }
+  if (!immutable && etagMatches(request.headers.get('if-none-match'), validator)) {
+    return new Response(null, { status: 304, headers })
+  }
+  headers.set('content-length', String(size))
   return new Response(object.body as unknown as BodyInit, { headers })
 }
 
@@ -757,26 +779,35 @@ async function streamAsset(
   scope: AssetScope,
   filename: string,
   fallbackDocIds: string[],
+  request: Request,
   versionId?: string | null,
 ): Promise<Response> {
   const row = await resolveAssetRow(db, scope, filename, fallbackDocIds)
   if (!row) return json({ error: 'not-found' }, 404)
 
-  if (versionId) return streamAssetVersionById(db, bucket, row, versionId)
-  if (row.currentVersionId) return streamAssetVersionById(db, bucket, row, row.currentVersionId)
+  if (versionId) return streamAssetVersionById(db, bucket, row, versionId, request, true)
+  if (row.currentVersionId) return streamAssetVersionById(db, bucket, row, row.currentVersionId, request, false)
 
   const object = await bucket.get(row.r2Key)
   if (!object) return json({ error: 'not-found' }, 404) // honest 404: row without bytes
+  // Assets are served from a STABLE per-filename URL, so a re-push (overwrite)
+  // reuses the same URL with new bytes. `no-cache` (not `max-age`) makes the
+  // browser revalidate on every load instead of serving a stale copy for the
+  // freshness window — the fix for "update not visible without a hard refresh".
+  // The ETag keeps that revalidation cheap: unchanged bytes come back as a 304.
   const headers = new Headers({
     'content-type': row.contentType,
-    'content-length': String(object.size),
     etag: object.httpEtag,
-    'cache-control': 'private, max-age=3600',
+    'cache-control': 'private, no-cache',
   })
   if (assetKindForContentType(row.contentType) === 'html') {
     headers.set('content-security-policy', 'sandbox allow-scripts')
     headers.set('x-content-type-options', 'nosniff')
   }
+  if (etagMatches(request.headers.get('if-none-match'), object.httpEtag)) {
+    return new Response(null, { status: 304, headers })
+  }
+  headers.set('content-length', String(object.size))
   return new Response(object.body as unknown as BodyInit, { headers })
 }
 
@@ -867,6 +898,19 @@ async function objectArrayBuffer(object: R2ObjectBody): Promise<ArrayBuffer> {
     return (await (body as { arrayBuffer: () => Promise<ArrayBuffer> }).arrayBuffer()) as ArrayBuffer
   }
   return new Response(body as BodyInit).arrayBuffer()
+}
+
+/**
+ * True when an `If-None-Match` header covers `etag` (a quoted validator),
+ * so the cached copy is still current and a 304 may be returned. Tolerates the
+ * `*` wildcard, comma-separated lists, and weak (`W/`) prefixes.
+ */
+function etagMatches(ifNoneMatch: string | null, etag: string): boolean {
+  if (!ifNoneMatch) return false
+  if (ifNoneMatch.trim() === '*') return true
+  const strip = (tag: string) => tag.trim().replace(/^W\//, '')
+  const target = strip(etag)
+  return ifNoneMatch.split(',').some((tag) => strip(tag) === target)
 }
 
 async function deleteAsset(
