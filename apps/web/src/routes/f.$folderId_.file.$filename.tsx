@@ -143,6 +143,10 @@ export function HtmlAssetViewerChrome({
 
   const meQuery = useQuery({ queryKey: ['me'], queryFn: fetchMe, staleTime: 60_000, retry: false })
   const me: Principal | null = meQuery.data ?? null
+  // `folderRole` here is the caller's effective role ON THIS FILE: for a per-file
+  // share-link visitor the listing returns the asset-token role (max'd with any
+  // folder role), so a commenter file link enables commenting even for someone
+  // who is only a folder viewer. Commenting still requires sign-in (attribution).
   const canComment = me !== null && roleAtLeast(folderRole, 'commenter')
   // Sharing this file is owner-only — the same gate the doc/vault share dialogs use.
   const canShare = me !== null && folderRole === 'owner'

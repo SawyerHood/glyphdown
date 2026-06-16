@@ -296,6 +296,13 @@ export async function handleFolderAssets(
   folderId: string,
   subPath: string,
   auth: AuthContext | null,
+  /**
+   * When set (a per-file asset-token read), pin every filename-addressed read
+   * to this exact asset id: a handler that resolves a different id for the same
+   * filename (a concurrent replacement) 404s instead of serving an asset the
+   * token never authorized. Unset on the folder-member path (any asset goes).
+   */
+  expectedAssetId?: string,
 ): Promise<Response> {
   const scope: AssetScope = { kind: 'folder', id: folderId }
   // Legacy doc-scoped rows of docs homed here resolve through this surface
@@ -313,20 +320,20 @@ export async function handleFolderAssets(
   const versionRoute = assetVersionRoute(subPath)
   if (versionRoute) {
     if (auth === null) return json({ error: 'forbidden' }, 403)
-    return handleAssetVersions(db, bucket, request, scope, versionRoute.filename, fallbackIds, auth, versionRoute)
+    return handleAssetVersions(db, bucket, request, scope, versionRoute.filename, fallbackIds, auth, versionRoute, expectedAssetId)
   }
 
   const commentingViewMatch = subPath.match(/^\/assets\/([^/]+)\/commenting-view$/)
   if (commentingViewMatch) {
     if (request.method !== 'GET') return json({ error: 'method-not-allowed' }, 405)
     const filename = safeDecode(commentingViewMatch[1]!)
-    return streamAssetCommentingView(db, bucket, scope, filename, fallbackIds, assetPublicPath(url))
+    return streamAssetCommentingView(db, bucket, scope, filename, fallbackIds, assetPublicPath(url), expectedAssetId)
   }
 
   const match = subPath.match(/^\/assets\/([^/]+)$/)
   if (!match) return json({ error: 'not-found' }, 404)
   const filename = safeDecode(match[1]!)
-  if (request.method === 'GET') return streamAsset(db, bucket, scope, filename, fallbackIds, request, url.searchParams.get('version'))
+  if (request.method === 'GET') return streamAsset(db, bucket, scope, filename, fallbackIds, request, url.searchParams.get('version'), expectedAssetId)
   if (request.method === 'DELETE') {
     // Same gate as the doc-scoped delete (SPEC §4): editor+ only.
     if (auth === null || !roleAtLeast(auth.role, 'editor')) return json({ error: 'forbidden' }, 403)
@@ -606,9 +613,11 @@ async function handleAssetVersions(
   fallbackDocIds: string[],
   auth: AuthContext,
   route: AssetVersionRoute,
+  expectedAssetId?: string,
 ): Promise<Response> {
   const row = await resolveAssetRow(db, scope, filename, fallbackDocIds)
   if (!row) return json({ error: 'not-found' }, 404)
+  if (expectedAssetId !== undefined && row.id !== expectedAssetId) return json({ error: 'not-found' }, 404)
 
   if (!route.versionId && !route.action) {
     if (request.method !== 'GET') return json({ error: 'method-not-allowed' }, 405)
@@ -781,9 +790,11 @@ async function streamAsset(
   fallbackDocIds: string[],
   request: Request,
   versionId?: string | null,
+  expectedAssetId?: string,
 ): Promise<Response> {
   const row = await resolveAssetRow(db, scope, filename, fallbackDocIds)
   if (!row) return json({ error: 'not-found' }, 404)
+  if (expectedAssetId !== undefined && row.id !== expectedAssetId) return json({ error: 'not-found' }, 404)
 
   if (versionId) return streamAssetVersionById(db, bucket, row, versionId, request, true)
   if (row.currentVersionId) return streamAssetVersionById(db, bucket, row, row.currentVersionId, request, false)
@@ -818,9 +829,11 @@ async function streamAssetCommentingView(
   filename: string,
   fallbackDocIds: string[],
   publicAssetPath: string,
+  expectedAssetId?: string,
 ): Promise<Response> {
   const row = await resolveAssetRow(db, scope, filename, fallbackDocIds)
   if (!row) return json({ error: 'not-found' }, 404)
+  if (expectedAssetId !== undefined && row.id !== expectedAssetId) return json({ error: 'not-found' }, 404)
   if (assetKindForContentType(row.contentType) !== 'html') return json({ error: 'unsupported-asset-type' }, 415)
   const object = row.currentVersionId
     ? await versionObject(db, bucket, row, row.currentVersionId)

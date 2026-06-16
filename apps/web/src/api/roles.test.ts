@@ -429,6 +429,8 @@ describe('assetShareLinkRole (per-file/asset share tokens)', () => {
     link.run('tok-b-view', 'asset', 'asset-B', 'viewer', 'owner-1', now, null)
     link.run('tok-a-dead', 'asset', 'asset-A', 'commenter', 'owner-1', now, 999)
     link.run('tok-folder', 'folder', 'folder-1', 'editor', 'owner-1', now, null)
+    // A defensive case: a stored editor asset link (creation now rejects these).
+    link.run('tok-a-edit', 'asset', 'asset-A', 'editor', 'owner-1', now, null)
     return drizzle(sqlite, { schema }) as unknown as Db
   }
 
@@ -456,5 +458,13 @@ describe('assetShareLinkRole (per-file/asset share tokens)', () => {
     expect(await assetShareLinkRole(db, 'folder-1', alice, 'tok-folder')).toBeNull()
     expect(await assetShareLinkRole(db, 'asset-A', alice, 'tok-missing')).toBeNull()
     expect(await assetShareLinkRole(db, 'asset-A', alice, null)).toBeNull()
+  })
+
+  it('caps a stored suggest/edit role at commenter (asset links are view/comment only)', async () => {
+    const db = setup()
+    // Signed-in: an editor asset link confers at most commenter on a file.
+    expect(await assetShareLinkRole(db, 'asset-A', alice, 'tok-a-edit')).toBe('commenter')
+    // Anonymous: capped to commenter then denied (not a view link).
+    expect(await assetShareLinkRole(db, 'asset-A', null, 'tok-a-edit')).toBeNull()
   })
 })

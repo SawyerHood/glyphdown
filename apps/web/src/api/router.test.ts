@@ -1204,6 +1204,51 @@ describe('asset share-link CRUD (POST/GET/DELETE /api/folders/:id/assets/:file/s
     })
     expect(res!.status).toBe(404)
   })
+
+  it('rejects suggester/editor asset-link roles server-side (400) and creates nothing', async () => {
+    const headers = principalFor('alice')
+    seedTwoFileTree()
+    for (const role of ['suggester', 'editor']) {
+      const res = await api('/api/folders/sub/assets/a.html/share-links', {
+        method: 'POST',
+        headers: { ...headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ role }),
+      })
+      expect(res!.status).toBe(400)
+      expect(await jsonOf<{ error: string }>(res)).toEqual({ error: 'bad-role' })
+    }
+    expect(raw.prepare(`SELECT COUNT(*) AS n FROM share_links`).get()).toEqual({ n: 0 })
+    // view/comment are accepted.
+    for (const role of ['viewer', 'commenter']) {
+      const ok = await api('/api/folders/sub/assets/a.html/share-links', {
+        method: 'POST',
+        headers: { ...headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ role }),
+      })
+      expect(ok!.status).toBe(200)
+    }
+  })
+
+  it('GET list and DELETE revoke are owner-only too (strangers 404, members 403, link survives)', async () => {
+    const headers = principalFor('alice')
+    seedTwoFileTree()
+    const bob = principalFor('bob')
+    const eve = principalFor('eve')
+    grantFolder('v1', 'eve', 'editor')
+    seedShareLink('tok-A', 'asset', 'a-A', 'viewer')
+
+    // GET list
+    expect((await api('/api/folders/sub/assets/a.html/share-links', { headers: bob }))!.status).toBe(404)
+    expect((await api('/api/folders/sub/assets/a.html/share-links', { headers: eve }))!.status).toBe(403)
+    expect((await api('/api/folders/sub/assets/a.html/share-links', { headers }))!.status).toBe(200)
+
+    // DELETE revoke
+    expect((await api('/api/folders/sub/assets/a.html/share-links/tok-A', { method: 'DELETE', headers: bob }))!.status).toBe(404)
+    expect((await api('/api/folders/sub/assets/a.html/share-links/tok-A', { method: 'DELETE', headers: eve }))!.status).toBe(403)
+    // The link is untouched by the rejected revokes.
+    expect(raw.prepare(`SELECT revoked_at FROM share_links WHERE token = 'tok-A'`).get()).toEqual({ revoked_at: null })
+    expect((await api('/api/folders/sub/assets/a.html/share-links/tok-A', { method: 'DELETE', headers }))!.status).toBe(200)
+  })
 })
 
 describe('asset share-link access (restricted listing + raw + comments)', () => {
@@ -1235,11 +1280,67 @@ describe('asset share-link access (restricted listing + raw + comments)', () => 
     expect(view!.headers.get('content-security-policy')).toBe('sandbox allow-scripts')
   })
 
-  it('an asset token cannot list a DIFFERENT folder (no subtree escape)', async () => {
+  it('the restricted listing hides a CHILD folder (and its docs/assets) under the shared folder', async () => {
     seedTwoFileTree()
+    seedFolder('child', 'alice', 'sub', 'Child') // a subfolder of the shared folder
+    seedDoc('d-child', 'alice', 'child.md', 'child')
+    seedHtmlAsset('a-child', 'child', null, 'child.html')
     seedShareLink('tok-A', 'asset', 'a-A', 'viewer')
-    // a-A lives in sub, not v1 — its token must not produce a v1 listing.
-    expect((await api('/api/folders/v1/listing?share=tok-A'))!.status).toBe(404)
+
+    const listing = await jsonOf<Listing>(await api('/api/folders/sub/listing?share=tok-A'))
+    expect(listing.folder.assets.map((a) => a.filename)).toEqual(['a.html'])
+    expect(listing.folders).toEqual([]) // the child folder is invisible
+    expect(listing.docs).toEqual([])
+  })
+
+  it('an asset token cannot list a sibling, child, or unrelated folder (no escape in any direction)', async () => {
+    seedTwoFileTree()
+    seedFolder('sib', 'alice', 'v1', 'Sibling') // sibling of sub
+    seedFolder('child', 'alice', 'sub', 'Child') // child of sub (where the asset lives)
+    seedVault('v2', 'alice', 'Other') // unrelated vault
+    seedShareLink('tok-A', 'asset', 'a-A', 'viewer')
+
+    // The asset lives in sub; its token lists nothing but sub.
+    expect((await api('/api/folders/v1/listing?share=tok-A'))!.status).toBe(404) // parent
+    expect((await api('/api/folders/sib/listing?share=tok-A'))!.status).toBe(404) // sibling
+    expect((await api('/api/folders/child/listing?share=tok-A'))!.status).toBe(404) // child
+    expect((await api('/api/folders/v2/listing?share=tok-A'))!.status).toBe(404) // unrelated
+    // The shared folder itself still lists (just the one asset).
+    const ok = await jsonOf<Listing>(await api('/api/folders/sub/listing?share=tok-A'))
+    expect(ok.folder.assets.map((a) => a.filename)).toEqual(['a.html'])
+  })
+
+  it('a folder VIEWER following a higher (commenter) file link gets commenter on that file', async () => {
+    seedTwoFileTree()
+    const bob = principalFor('bob')
+    grantFolder('v1', 'bob', 'viewer') // bob is only a folder viewer
+    seedShareLink('tok-comment', 'asset', 'a-A', 'commenter')
+
+    // Restricted single-asset listing at the elevated role — the UI can comment.
+    const listing = await jsonOf<Listing>(await api('/api/folders/sub/listing?share=tok-comment', { headers: bob }))
+    expect(listing.folder.role).toBe('commenter')
+    expect(listing.folder.assets.map((a) => a.filename)).toEqual(['a.html'])
+    expect(listing.folders).toEqual([])
+    expect(listing.docs).toEqual([])
+    // And the comment route honors it.
+    const wrote = await api('/api/folders/sub/assets/a.html/comments?share=tok-comment', {
+      method: 'POST',
+      headers: { ...bob, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'from a folder viewer' }),
+    })
+    expect(wrote!.status).toBe(200)
+  })
+
+  it('a folder member with an equal/lower file link keeps the full folder listing at their role', async () => {
+    seedTwoFileTree()
+    const bob = principalFor('bob')
+    grantFolder('v1', 'bob', 'editor') // editor outranks a viewer file link
+    seedShareLink('tok-view', 'asset', 'a-A', 'viewer')
+
+    const listing = await jsonOf<Listing>(await api('/api/folders/sub/listing?share=tok-view', { headers: bob }))
+    expect(listing.folder.role).toBe('editor')
+    // Full listing: both files are present (not restricted to the shared one).
+    expect(listing.folder.assets.map((a) => a.filename).sort()).toEqual(['a.html', 'b.html'])
   })
 
   it('a revoked asset token grants nothing (listing, raw, and comments all deny)', async () => {

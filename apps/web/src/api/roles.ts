@@ -256,8 +256,11 @@ export async function assetShareLinkRole(
   if (!shareToken) return null
   const link = (await db.select().from(shareLinks).where(eq(shareLinks.token, shareToken)).limit(1))[0]
   if (!link || link.revokedAt !== null || link.targetType !== 'asset' || link.targetId !== assetId) return null
-  if (principal) return link.role
-  return link.role === 'viewer' ? 'viewer' : null
+  // Defense in depth: asset links are view/comment only (creation rejects the
+  // higher roles). Never let a stored suggest/edit value grant more on a file.
+  const role: Role = ROLES.indexOf(link.role) > ROLES.indexOf('commenter') ? 'commenter' : link.role
+  if (principal) return role
+  return role === 'viewer' ? 'viewer' : null
 }
 
 /**
