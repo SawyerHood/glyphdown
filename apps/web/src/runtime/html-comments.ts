@@ -140,9 +140,12 @@ export function installHtmlCommentsRuntime(nonce: string): void {
   const hoverClass = 'gd-html-comment-hover'
   const focusClass = 'gd-html-comment-focus'
   const anchoredClass = 'gd-html-comment-anchored'
+  const hostClass = 'gd-html-comments-host'
   const markers = new Map<string, Marker>()
   let pickMode = false
   let hover: Element | null = null
+  let host: HTMLDivElement | null = null
+  let shadow: ShadowRoot | null = null
   let markerLayer: HTMLDivElement | null = null
 
   function post(message: Omit<Record<string, unknown>, 'nonce' | 'version'>): void {
@@ -154,6 +157,8 @@ export function installHtmlCommentsRuntime(nonce: string): void {
     else fn()
   }
 
+  // Only the highlight outlines live in the page (light DOM) — they decorate the
+  // AUTHOR's own elements, so shadow-scoped styles could not reach them.
   function installStyles(): void {
     if (document.getElementById('gd-html-comments-style')) return
     const style = document.createElement('style')
@@ -162,23 +167,46 @@ export function installHtmlCommentsRuntime(nonce: string): void {
       .${hoverClass} { outline: 2px solid #2563eb !important; outline-offset: 2px !important; cursor: crosshair !important; }
       .${focusClass} { outline: 3px solid #0f766e !important; outline-offset: 3px !important; }
       .${anchoredClass} { box-shadow: inset 0 0 0 2px rgba(37, 99, 235, 0.42) !important; }
-      .gd-html-comment-marker-layer { position: fixed; inset: 0; z-index: 2147483646; pointer-events: none; }
-      .${markerClass} {
-        position: fixed; width: 18px; height: 18px; border: 2px solid #fff; border-radius: 999px;
-        background: #2563eb; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.24); cursor: pointer;
-        pointer-events: auto; transform: translate(-50%, -50%);
-      }
-      .${markerClass}:focus-visible { outline: 2px solid #0f766e; outline-offset: 2px; }
     `
     document.head.appendChild(style)
   }
 
-  function ensureMarkerLayer(): HTMLDivElement {
-    if (markerLayer?.isConnected) return markerLayer
+  // The marker bubbles live inside a Shadow DOM on a style-neutralized host so the
+  // page's CSS (global `button`/`*` rules, inherited fonts, a transformed
+  // ancestor) can't warp or mis-position them. `all: initial` walls off
+  // inheritance; the host carries no transform/filter/contain, so the markers'
+  // `position: fixed` stays relative to the viewport.
+  function ensureShadow(): ShadowRoot {
+    if (host?.isConnected && shadow && markerLayer?.isConnected) return shadow
+    host = document.createElement('div')
+    host.className = hostClass
+    host.setAttribute(
+      'style',
+      'all: initial !important; position: fixed !important; inset: 0 !important; z-index: 2147483647 !important; pointer-events: none !important; transform: none !important; filter: none !important; contain: none !important;',
+    )
+    shadow = host.attachShadow({ mode: 'open' })
+    const style = document.createElement('style')
+    style.textContent = `
+      .layer { position: fixed; inset: 0; pointer-events: none; }
+      .${markerClass} {
+        position: fixed; box-sizing: border-box; width: 18px; height: 18px; padding: 0; margin: 0;
+        border: 2px solid #fff; border-radius: 999px; background: #2563eb;
+        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.24); cursor: pointer; pointer-events: auto;
+        transform: translate(-50%, -50%); font: inherit;
+      }
+      .${markerClass}:focus-visible { outline: 2px solid #0f766e; outline-offset: 2px; }
+    `
+    shadow.appendChild(style)
     markerLayer = document.createElement('div')
-    markerLayer.className = 'gd-html-comment-marker-layer'
-    document.documentElement.appendChild(markerLayer)
-    return markerLayer
+    markerLayer.className = 'layer'
+    shadow.appendChild(markerLayer)
+    document.documentElement.appendChild(host)
+    return shadow
+  }
+
+  function ensureMarkerLayer(): HTMLDivElement {
+    ensureShadow()
+    return markerLayer!
   }
 
   function setHover(next: Element | null): void {
@@ -199,7 +227,8 @@ export function installHtmlCommentsRuntime(nonce: string): void {
     if (tag === 'html' || tag === 'head' || tag === 'body' || tag === 'script' || tag === 'style' || tag === 'noscript') {
       return false
     }
-    if (element.closest(`.${markerClass}, .gd-html-comment-marker-layer`)) return false
+    // Marker bubbles live in a shadow root; a click on one retargets to the host.
+    if (element.closest(`.${hostClass}`)) return false
     return true
   }
 
