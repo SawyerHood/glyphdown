@@ -75,6 +75,7 @@ import {
 import CommentsSidebar, { type PendingComment } from './CommentsSidebar.tsx'
 import SuggestionsPanel from './SuggestionsPanel.tsx'
 import ShareDialog from './ShareDialog.tsx'
+import EditorHeader, { BrandSquare } from './EditorHeader.tsx'
 import BacklinksPanel from './BacklinksPanel.tsx'
 
 export const commentsKey = (docId: string) => ['doc-comments', docId] as const
@@ -808,122 +809,123 @@ export function DocEditorPage({ docId, share }: { docId: string; share: string |
   return (
     <div className="flex h-dvh flex-col bg-[var(--bg-base)]">
       {/* Toolbar */}
-      <header className="z-40 flex h-12 shrink-0 items-center gap-2 border-b border-[var(--line)] bg-[var(--paper)] px-3">
-        <Link to="/" className="flex shrink-0 items-center gap-1.5 text-[var(--ink)] no-underline" title="All documents">
-          <span className="flex h-6 w-6 items-center justify-center rounded-md bg-[var(--accent)] text-white">
-            <PenLine size={13} />
-          </span>
-        </Link>
+      <EditorHeader
+        brand={
+          <Link to="/" className="no-underline" title="All documents">
+            <BrandSquare>
+              <PenLine size={13} />
+            </BrandSquare>
+          </Link>
+        }
+        title={
+          meta === null ? (
+            // First visit, meta still in flight: a quiet title-width bar keeps
+            // the toolbar frame stable (nothing on error — the column says it).
+            docQuery.isError ? null : <div aria-hidden className="skeleton-appear skeleton-bar h-3.5 w-36" />
+          ) : renaming ? (
+            <input
+              value={titleDraft}
+              autoFocus
+              onChange={(e) => setTitleDraft(liveSlug(e.target.value))}
+              onBlur={() => void saveTitle()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void saveTitle()
+                if (e.key === 'Escape') {
+                  setTitleDraft(meta.title)
+                  setRenaming(false)
+                }
+              }}
+              className="min-w-0 max-w-72 rounded border border-[var(--line)] bg-[var(--paper)] px-1.5 py-0.5 text-sm font-semibold text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+            />
+          ) : (
+            <button
+              type="button"
+              className="group flex min-w-0 items-center gap-1.5 truncate text-sm font-semibold text-[var(--ink)]"
+              onClick={() => isOwner && setRenaming(true)}
+              title={isOwner ? 'Rename' : meta.title}
+            >
+              <span className="truncate">{meta.title}</span>
+              {isOwner ? <Pencil size={11} className="shrink-0 opacity-0 transition group-hover:opacity-60" /> : null}
+            </button>
+          )
+        }
+        badges={
+          <>
+            {meta !== null && !canEdit ? <Badge tone="blue">{role}</Badge> : null}
+            <ConnectionPill status={status} established={docSynced} />
+          </>
+        }
+      >
+        <PresenceStack peers={peers} />
 
-        {meta === null ? (
-          // First visit, meta still in flight: a quiet title-width bar keeps
-          // the toolbar frame stable (nothing on error — the column says it).
-          docQuery.isError ? null : <div aria-hidden className="skeleton-appear skeleton-bar h-3.5 w-36" />
-        ) : renaming ? (
-          <input
-            value={titleDraft}
-            autoFocus
-            onChange={(e) => setTitleDraft(liveSlug(e.target.value))}
-            onBlur={() => void saveTitle()}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void saveTitle()
-              if (e.key === 'Escape') {
-                setTitleDraft(meta.title)
-                setRenaming(false)
-              }
-            }}
-            className="min-w-0 max-w-72 rounded border border-[var(--line)] bg-[var(--paper)] px-1.5 py-0.5 text-sm font-semibold text-[var(--ink)] outline-none focus:border-[var(--accent)]"
-          />
+        {meta === null ? null : canSuggest && canEdit ? (
+          <div className="flex overflow-hidden rounded-md border border-[var(--line)] text-xs font-medium">
+            <button
+              type="button"
+              onClick={() => setMode('edit')}
+              className={`px-2.5 py-1 ${mode === 'edit' ? 'bg-[var(--accent)] text-white' : 'bg-[var(--paper)] text-[var(--ink-soft)] hover:bg-[var(--paper-soft)]'}`}
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('suggest')}
+              className={`px-2.5 py-1 ${mode === 'suggest' ? 'bg-green-600 text-white' : 'bg-[var(--paper)] text-[var(--ink-soft)] hover:bg-[var(--paper-soft)]'}`}
+            >
+              Suggest
+            </button>
+          </div>
+        ) : canSuggest ? (
+          <Badge tone="green">suggesting</Badge>
         ) : (
-          <button
-            type="button"
-            className="group flex min-w-0 items-center gap-1.5 truncate text-sm font-semibold text-[var(--ink)]"
-            onClick={() => isOwner && setRenaming(true)}
-            title={isOwner ? 'Rename' : meta.title}
-          >
-            <span className="truncate">{meta.title}</span>
-            {isOwner ? <Pencil size={11} className="shrink-0 opacity-0 transition group-hover:opacity-60" /> : null}
-          </button>
+          <span className="flex items-center gap-1 text-xs text-[var(--ink-faint)]">
+            <Eye size={12} /> read-only
+          </span>
         )}
 
-        {meta !== null && !canEdit ? <Badge tone="blue">{role}</Badge> : null}
-        <ConnectionPill status={status} established={docSynced} />
+        {/* Secondary tools step back on phone widths so the comment toggle
+            (and Share) never overflow the toolbar. */}
+        <Button size="sm" variant="ghost" onClick={toggleSource} title={sourceView ? 'Live preview' : 'Raw source'} className={`max-sm:hidden ${sourceView ? 'text-[var(--accent)]' : ''}`}>
+          <FileCode2 size={15} />
+        </Button>
 
-        {/* gap-1 below sm: the action cluster's min-content otherwise crowds
-            the title off narrow phones (the title is the row's only
-            shrinkable item). */}
-        <div className="ml-auto flex items-center gap-1 sm:gap-1.5">
-          <PresenceStack peers={peers} />
-
-          {meta === null ? null : canSuggest && canEdit ? (
-            <div className="flex overflow-hidden rounded-md border border-[var(--line)] text-xs font-medium">
-              <button
-                type="button"
-                onClick={() => setMode('edit')}
-                className={`px-2.5 py-1 ${mode === 'edit' ? 'bg-[var(--accent)] text-white' : 'bg-[var(--paper)] text-[var(--ink-soft)] hover:bg-[var(--paper-soft)]'}`}
-              >
-                Edit
-              </button>
-              <button
-                type="button"
-                onClick={() => setMode('suggest')}
-                className={`px-2.5 py-1 ${mode === 'suggest' ? 'bg-green-600 text-white' : 'bg-[var(--paper)] text-[var(--ink-soft)] hover:bg-[var(--paper-soft)]'}`}
-              >
-                Suggest
-              </button>
-            </div>
-          ) : canSuggest ? (
-            <Badge tone="green">suggesting</Badge>
-          ) : (
-            <span className="flex items-center gap-1 text-xs text-[var(--ink-faint)]">
-              <Eye size={12} /> read-only
-            </span>
-          )}
-
-          {/* Secondary tools step back on phone widths so the comment toggle
-              (and Share) never overflow the toolbar. */}
-          <Button size="sm" variant="ghost" onClick={toggleSource} title={sourceView ? 'Live preview' : 'Raw source'} className={`max-sm:hidden ${sourceView ? 'text-[var(--accent)]' : ''}`}>
-            <FileCode2 size={15} />
+        {canEdit ? (
+          <Button size="sm" variant="ghost" onClick={() => setNamingVersion(true)} title="Name this version" className="max-sm:hidden">
+            <Tag size={15} />
           </Button>
+        ) : null}
 
-          {canEdit ? (
-            <Button size="sm" variant="ghost" onClick={() => setNamingVersion(true)} title="Name this version" className="max-sm:hidden">
-              <Tag size={15} />
-            </Button>
+        <Link
+          to="/d/$docId/history"
+          params={{ docId }}
+          search={share ? { share } : {}}
+          className="rounded-md p-1.5 text-[var(--ink-soft)] transition hover:bg-[var(--paper-soft)] hover:text-[var(--ink)] max-sm:hidden"
+          title="Version history"
+        >
+          <History size={15} />
+        </Link>
+
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => {
+            setSidebarOpen((v) => !v)
+          }}
+          title="Comments & suggestions"
+          className={`max-lg:px-3 max-lg:py-2 ${sidebarOpen ? 'text-[var(--accent)]' : ''}`}
+        >
+          <MessageSquare size={15} />
+          {openComments + openSuggestions > 0 ? (
+            <span className="text-[11px] font-semibold">{openComments + openSuggestions}</span>
           ) : null}
+        </Button>
 
-          <Link
-            to="/d/$docId/history"
-            params={{ docId }}
-            search={share ? { share } : {}}
-            className="rounded-md p-1.5 text-[var(--ink-soft)] transition hover:bg-[var(--paper-soft)] hover:text-[var(--ink)] max-sm:hidden"
-            title="Version history"
-          >
-            <History size={15} />
-          </Link>
-
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => {
-              setSidebarOpen((v) => !v)
-            }}
-            title="Comments & suggestions"
-            className={`max-lg:px-3 max-lg:py-2 ${sidebarOpen ? 'text-[var(--accent)]' : ''}`}
-          >
-            <MessageSquare size={15} />
-            {openComments + openSuggestions > 0 ? (
-              <span className="text-[11px] font-semibold">{openComments + openSuggestions}</span>
-            ) : null}
+        {isOwner ? (
+          <Button size="sm" variant="primary" onClick={() => setShareOpen(true)} title="Share">
+            <Share2 size={13} /> <span className="hidden sm:inline">Share</span>
           </Button>
-
-          {isOwner ? (
-            <Button size="sm" variant="primary" onClick={() => setShareOpen(true)} title="Share">
-              <Share2 size={13} /> <span className="hidden sm:inline">Share</span>
-            </Button>
-          ) : null}
-        </div>
-      </header>
+        ) : null}
+      </EditorHeader>
 
       {/* Banners */}
       {deleted ? (
