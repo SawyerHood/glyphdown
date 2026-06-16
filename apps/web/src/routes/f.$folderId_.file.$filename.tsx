@@ -328,16 +328,6 @@ export function HtmlAssetViewerChrome({
     postToFrame({ t: 'gd:set-markers', markers: markerPayload })
   }, [frameReady, markerPayload, postToFrame])
 
-  // On desktop the comments panel is part of the layout (like the mockup) and
-  // having it open means you're in comment mode; on mobile it stays a bottom
-  // sheet you open on demand.
-  useEffect(() => {
-    if (!isMobile) {
-      setSidebarOpen(true)
-      setPicking(true)
-    }
-  }, [isMobile])
-
   // Single control: opening the comments panel enters comment mode, closing it
   // returns to browsing (and drops any in-progress pick/compose).
   const toggleComments = useCallback(() => {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { createElement } from 'react'
 import { RouterProvider, createMemoryHistory, createRouter } from '@tanstack/react-router'
 import type { AssetMeta, Comment, FolderListingResponse, NodeAnchor, Principal } from '@glyphdown/protocol'
@@ -186,8 +186,9 @@ describe('folder HTML viewer route', () => {
     await waitFor(() => expect(screen.getByTitle('page.html')).toBeTruthy())
     await waitFor(() => expect(screen.getByTitle('Comments').textContent).toContain('1'))
 
-    // The comments panel is part of the desktop layout (matchMedia matches:false),
-    // so it is open by default — no toggle click needed.
+    // The panel is closed by default; opening it enters comment mode.
+    fireEvent.click(screen.getByTitle('Comments'))
+
     expect(await screen.findByText('Check this total')).toBeTruthy()
     expect(screen.getByText('h1 "Quarterly revenue"')).toBeTruthy()
   })
