@@ -16,23 +16,98 @@ export type HtmlCommentsParentMessage =
   | { t: 'gd:set-markers'; version: 1; nonce: string; markers: Array<{ id: string; anchor: NodeAnchor }> }
   | { t: 'gd:focus-marker'; version: 1; nonce: string; id: string }
 
+// Bounds on untrusted iframe → parent messages. The injected runtime shares the
+// iframe JS realm with author scripts (plan §2.4), so EVERY field is validated and
+// length-bounded here before the parent treats it as typed data. This is schema
+// filtering, not authentication — the server stays the sole authority.
+const MAX_STR = 1024
+const MAX_PATH_STEPS = 256
+const MAX_MARKERS = 5000
+
 export function isHtmlCommentsFrameMessage(value: unknown, nonce: string): value is HtmlCommentsFrameMessage {
-  if (!isRecord(value) || value['version'] !== 1 || value['nonce'] !== nonce) return false
-  return (
-    value['t'] === 'gd:ready' ||
-    value['t'] === 'gd:select' ||
-    value['t'] === 'gd:markers-resolved' ||
-    value['t'] === 'gd:marker-click'
-  )
+  if (!isEnvelope(value, nonce)) return false
+  switch (value['t']) {
+    case 'gd:ready':
+      return true
+    case 'gd:select':
+      return isNodeAnchorShape(value['anchor'])
+    case 'gd:markers-resolved':
+      return isBoundedArray(value['markers'], MAX_MARKERS, isMarkerResolution)
+    case 'gd:marker-click':
+      return isBoundedString(value['id'])
+    default:
+      return false
+  }
 }
 
 export function isHtmlCommentsParentMessage(value: unknown, nonce: string): value is HtmlCommentsParentMessage {
-  if (!isRecord(value) || value['version'] !== 1 || value['nonce'] !== nonce) return false
-  return value['t'] === 'gd:set-mode' || value['t'] === 'gd:set-markers' || value['t'] === 'gd:focus-marker'
+  if (!isEnvelope(value, nonce)) return false
+  switch (value['t']) {
+    case 'gd:set-mode':
+      return value['mode'] === 'browse' || value['mode'] === 'pick'
+    case 'gd:set-markers':
+      return isBoundedArray(value['markers'], MAX_MARKERS, isMarkerInput)
+    case 'gd:focus-marker':
+      return isBoundedString(value['id'])
+    default:
+      return false
+  }
+}
+
+function isEnvelope(value: unknown, nonce: string): value is Record<string, unknown> {
+  return isRecord(value) && value['version'] === 1 && value['nonce'] === nonce && typeof value['t'] === 'string'
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
+}
+
+function isBoundedString(value: unknown, max = MAX_STR): value is string {
+  return typeof value === 'string' && value.length <= max
+}
+
+function isBoundedArray<T>(value: unknown, max: number, item: (v: unknown) => v is T): value is T[] {
+  return Array.isArray(value) && value.length <= max && value.every(item)
+}
+
+function isMarkerResolution(
+  value: unknown,
+): value is { id: string; status: 'anchored' | 'orphaned'; domHint?: number; label?: string } {
+  if (!isRecord(value) || !isBoundedString(value['id'])) return false
+  if (value['status'] !== 'anchored' && value['status'] !== 'orphaned') return false
+  if (value['domHint'] !== undefined && typeof value['domHint'] !== 'number') return false
+  if (value['label'] !== undefined && !isBoundedString(value['label'])) return false
+  return true
+}
+
+function isMarkerInput(value: unknown): value is { id: string; anchor: NodeAnchor } {
+  return isRecord(value) && isBoundedString(value['id']) && isNodeAnchorShape(value['anchor'])
+}
+
+function isNodeAnchorShape(value: unknown): value is NodeAnchor {
+  if (!isRecord(value) || value['schema'] !== 1) return false
+  if (!isBoundedArray(value['path'], MAX_PATH_STEPS, isNodeStepShape)) return false
+  const fp = value['fingerprint']
+  if (!isRecord(fp) || !isBoundedString(fp['tag'], 64)) return false
+  if (typeof value['domHint'] !== 'number') return false
+  if (!isBoundedString(value['label'])) return false
+  if (value['status'] !== 'anchored' && value['status'] !== 'orphaned') return false
+  const quote = value['quote']
+  if (quote !== undefined) {
+    if (
+      !isRecord(quote) ||
+      !isBoundedString(quote['exact'], 4096) ||
+      !isBoundedString(quote['prefix'], 256) ||
+      !isBoundedString(quote['suffix'], 256)
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
+function isNodeStepShape(value: unknown): value is { tag: string; nthOfType: number } {
+  return isRecord(value) && isBoundedString(value['tag'], 64) && typeof value['nthOfType'] === 'number'
 }
 
 export function installHtmlCommentsRuntime(nonce: string): void {
