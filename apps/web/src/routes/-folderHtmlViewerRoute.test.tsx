@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { createElement } from 'react'
 import { RouterProvider, createMemoryHistory, createRouter } from '@tanstack/react-router'
 import type { AssetMeta, Comment, FolderListingResponse, NodeAnchor, Principal } from '@glyphdown/protocol'

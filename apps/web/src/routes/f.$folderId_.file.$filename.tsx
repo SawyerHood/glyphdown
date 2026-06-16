@@ -179,22 +179,18 @@ export function HtmlAssetViewerChrome({
 
   // Stable 1..N numbering for open, resolvable node comments — shared by the
   // in-iframe marker bubbles and the sidebar thread badges so they line up.
+  // Number by the STORED domHint only (not the runtime round-trip), so this stays
+  // stable across gd:markers-resolved updates — otherwise markerPayload would
+  // change on every resolution, re-post set-markers, and loop the marker layer.
   const markerNumbers = useMemo(() => {
     const map = new Map<string, number>()
     comments
-      .filter(
-        (c) =>
-          !c.resolved &&
-          c.anchorKind === 'node' &&
-          c.nodeAnchor !== undefined &&
-          c.nodeAnchor.status !== 'orphaned' &&
-          markerResolutions[c.id]?.status !== 'orphaned',
-      )
-      .map((c) => ({ id: c.id, key: markerResolutions[c.id]?.domHint ?? c.nodeAnchor!.domHint, createdAt: c.createdAt }))
+      .filter((c) => !c.resolved && c.anchorKind === 'node' && c.nodeAnchor !== undefined && c.nodeAnchor.status !== 'orphaned')
+      .map((c) => ({ id: c.id, key: c.nodeAnchor!.domHint, createdAt: c.createdAt }))
       .sort((a, b) => a.key - b.key || a.createdAt - b.createdAt)
       .forEach((c, i) => map.set(c.id, i + 1))
     return map
-  }, [comments, markerResolutions])
+  }, [comments])
 
   const markerPayload = useMemo(
     () =>
@@ -316,7 +312,7 @@ export function HtmlAssetViewerChrome({
       if (orphaned) return { bucket: 'orphaned', preview }
       return {
         bucket: 'anchored',
-        sortKey: runtime?.domHint ?? comment.nodeAnchor.domHint,
+        sortKey: comment.nodeAnchor.domHint,
         markerNumber: markerNumbers.get(comment.id),
         preview,
       }
