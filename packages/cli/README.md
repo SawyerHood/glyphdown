@@ -188,6 +188,9 @@ ignored (noted once per sync on stderr). Syncable asset files are images
 (`png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`, `avif`) and HTML (`html`, `htm`),
 up to 10 MB. When sync uploads an HTML file in a folder workspace, it prints
 the viewer URL as `<server>/f/<folderId>/file/<filename>`.
+That viewer URL is also a CLI asset ref for `cat`, `history`, `comments`,
+`comment`, and `snapshot`; non-URL refs use a filename plus
+`--folder <folderRef>` or `--doc <docId>`.
 
 ### Workspace layout
 
@@ -304,11 +307,17 @@ suggestion is reviewed.
 ```sh
 glyphdown cat abc123              # working view (includes pending suggested insertions)
 glyphdown cat abc123 --clean      # "reject all" view
+glyphdown cat abc123 --version v1 # saved markdown version
 glyphdown cat abc123 --json       # { docId, view, text, versionId }
+glyphdown cat "https://server/f/folderId/file/page.html" --version av1
 glyphdown pull abc123 --clean     # pull the clean view instead
+glyphdown history abc123 --json   # saved markdown versions
+glyphdown history page.html --folder Research --json  # HTML asset versions
 ```
 
-`<doc>` accepts a doc id or a doc URL (`https://server/d/<docId>`).
+`<doc>` accepts a doc id or a doc URL (`https://server/d/<docId>`). HTML asset
+refs are viewer/API URLs, or a filename scoped by `--folder <folderRef>` /
+`--doc <docId>`.
 
 ## Comments
 
@@ -318,7 +327,13 @@ glyphdown comment abc123 --body "Should this ship?"   # doc-level comment
 glyphdown comment abc123 --line 12 --body "typo here" # anchored to line 12
 glyphdown comment abc123 --reply c42 --body "fixed"   # reply to thread c42
 glyphdown comment abc123 --resolve c42                # resolve (add --body to reply first)
+glyphdown comments "https://server/f/folderId/file/page.html" --json
+glyphdown comment page.html --folder Research --body "Check the dashboard" # asset-level thread
+glyphdown comment page.html --folder Research --reply c42 --body "fixed"
 ```
+
+CLI-created HTML asset comments are file-level. Node/element comments are
+created in the web viewer, then the CLI can list, reply, and resolve them.
 
 ## Share links (anyone-with-link)
 
@@ -357,11 +372,12 @@ anonymous access immediately.
 glyphdown vaults [--json]                  # vaults you can reach: id, role, name
 glyphdown new "Launch Plan" [--folder f | --vault v]  # create a doc; prints id + URL (neither flag: your default vault)
 glyphdown snapshot abc123 -m "pre-rewrite" # named version (do this before big pushes)
+glyphdown snapshot page.html --folder Research -m "baseline" # name current HTML asset version
 ```
 
 ## JSON output
 
-Every read command (`list`, `vaults`, `cat`, `comments`, `suggestions`, `new`) takes
+Every read command (`list`, `vaults`, `cat`, `history`, `comments`, `suggestions`, `new`) takes
 `--json` for machine-readable output, the `share` subcommands all take `--json`
 (create: `{target, id, token, role, createdAt, url}`; list: `[{token, role,
 createdAt, url}]`; revoke: `{ok, target, id, token}`), and `glyphdown sync --json`

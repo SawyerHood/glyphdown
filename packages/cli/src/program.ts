@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { normalizeEol } from '@glyphdown/core'
-import { SHARE_LINK_ROLES, type ShareLinkRole } from '@glyphdown/protocol'
+import { SHARE_LINK_ROLES, type AssetVersionMeta, type Comment, type ShareLinkRole, type VersionMeta } from '@glyphdown/protocol'
 import { Command, CommanderError } from 'commander'
 import pc from 'picocolors'
 import { type Api, createApi, pushWithBase } from './api.ts'
@@ -66,6 +66,40 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+type AssetTarget = { type: 'asset'; scope: 'doc' | 'folder'; id: string; filename: string }
+
+function parseAssetUrlRef(value: string): AssetTarget | null {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    if (!value.startsWith('/')) return null
+    url = new URL(value, 'https://glyphdown.local')
+  }
+
+  const folderViewer = url.pathname.match(/^\/f\/([^/]+)\/file\/([^/]+)$/)
+  if (folderViewer) {
+    return {
+      type: 'asset',
+      scope: 'folder',
+      id: decodeURIComponent(folderViewer[1]!),
+      filename: decodeURIComponent(folderViewer[2]!),
+    }
+  }
+
+  const apiAsset = url.pathname.match(/^\/api\/(docs|folders)\/([^/]+)\/assets\/([^/]+)(?:\/.*)?$/)
+  if (apiAsset) {
+    return {
+      type: 'asset',
+      scope: apiAsset[1] === 'folders' ? 'folder' : 'doc',
+      id: decodeURIComponent(apiAsset[2]!),
+      filename: decodeURIComponent(apiAsset[3]!),
+    }
+  }
+
+  return null
+}
+
 export function createProgram(deps: ProgramDeps = {}): Command {
   const env = deps.env ?? process.env
   const cwd = deps.cwd ?? (() => process.cwd())
@@ -84,6 +118,113 @@ export function createProgram(deps: ProgramDeps = {}): Command {
       ...(c.apiKey ? { apiKey: c.apiKey } : {}),
       ...(c.sessionToken ? { sessionToken: c.sessionToken } : {}),
     })
+  }
+
+  const resolveAssetTarget = async (
+    value: string,
+    opts: { folder?: string; doc?: string },
+  ): Promise<AssetTarget | null> => {
+    if (opts.folder && opts.doc) throw new CliError(1, 'use either --folder or --doc for an asset, not both')
+    if (opts.folder) return { type: 'asset', scope: 'folder', id: (await resolveFolder(apiFor(), opts.folder)).id, filename: value }
+    if (opts.doc) return { type: 'asset', scope: 'doc', id: parseDocRef(opts.doc), filename: value }
+    return parseAssetUrlRef(value)
+  }
+
+  const assetLabel = (target: AssetTarget): string =>
+    `${target.scope === 'folder' ? 'folder' : 'doc'} ${target.id}/${target.filename}`
+
+  const assetComments = async (api: Api, target: AssetTarget): Promise<Comment[]> =>
+    target.scope === 'folder'
+      ? api.listFolderAssetComments(target.id, target.filename)
+      : api.listDocAssetComments(target.id, target.filename)
+
+  const createAssetComment = async (api: Api, target: AssetTarget, body: string): Promise<Comment> =>
+    target.scope === 'folder'
+      ? api.createFolderAssetComment(target.id, target.filename, { body })
+      : api.createDocAssetComment(target.id, target.filename, { body })
+
+  const replyToAssetComment = async (
+    api: Api,
+    target: AssetTarget,
+    commentId: string,
+    body: string,
+  ) =>
+    target.scope === 'folder'
+      ? api.replyToFolderAssetComment(target.id, target.filename, commentId, body)
+      : api.replyToDocAssetComment(target.id, target.filename, commentId, body)
+
+  const resolveAssetComment = async (
+    api: Api,
+    target: AssetTarget,
+    commentId: string,
+    resolved = true,
+  ): Promise<void> =>
+    target.scope === 'folder'
+      ? api.resolveFolderAssetComment(target.id, target.filename, commentId, resolved)
+      : api.resolveDocAssetComment(target.id, target.filename, commentId, resolved)
+
+  const downloadAsset = async (api: Api, target: AssetTarget, versionId?: string) =>
+    target.scope === 'folder'
+      ? api.downloadFolderAsset(target.id, target.filename, versionId)
+      : api.downloadDocAsset(target.id, target.filename, versionId)
+
+  const listAssetVersions = async (api: Api, target: AssetTarget): Promise<AssetVersionMeta[]> =>
+    target.scope === 'folder'
+      ? api.listFolderAssetVersions(target.id, target.filename)
+      : api.listDocAssetVersions(target.id, target.filename)
+
+  const nameAssetVersion = async (
+    api: Api,
+    target: AssetTarget,
+    versionId: string,
+    name: string,
+  ): Promise<AssetVersionMeta> =>
+    target.scope === 'folder'
+      ? api.nameFolderAssetVersion(target.id, target.filename, versionId, name)
+      : api.nameDocAssetVersion(target.id, target.filename, versionId, name)
+
+  const commentLocation = (comment: Comment, asset: boolean): string => {
+    if (comment.anchorKind === 'node' && comment.nodeAnchor) return comment.nodeAnchor.label
+    if (comment.anchor) return `"${excerpt(comment.anchor.quote.exact)}"`
+    return pc.dim(asset ? '(asset-level)' : '(doc-level)')
+  }
+
+  const printOpenComments = (comments: Comment[], asset: boolean): void => {
+    const open = comments.filter((c) => !c.resolved)
+    if (open.length === 0) {
+      out('no open comments')
+      return
+    }
+    for (const c of open) {
+      const orphaned =
+        c.anchor?.status === 'orphaned' || c.nodeAnchor?.status === 'orphaned' ? pc.yellow(' [orphaned]') : ''
+      out(`${pc.bold(c.id)} ${pc.dim(c.authorName)} ${commentLocation(c, asset)}${orphaned}`)
+      out(`  ${c.body}`)
+      for (const r of c.replies) out(`  ↳ ${pc.dim(r.authorName)} ${r.body} ${pc.dim(`(${r.id})`)}`)
+    }
+  }
+
+  const printDocVersions = (versions: VersionMeta[]): void => {
+    if (versions.length === 0) {
+      out('no versions')
+      return
+    }
+    for (const v of versions) {
+      const name = v.name ? ` — ${v.name}` : ''
+      out(`${pc.bold(v.id)}  ${v.kind.padEnd(13)}  ${new Date(v.createdAt).toISOString()}  ${v.sizeBytes} bytes${name}`)
+    }
+  }
+
+  const printAssetVersions = (versions: AssetVersionMeta[]): void => {
+    if (versions.length === 0) {
+      out('no versions')
+      return
+    }
+    for (const v of versions) {
+      const current = v.current ? pc.green('*') : ' '
+      const name = v.message ? ` — ${v.message}` : ''
+      out(`${current} ${pc.bold(v.id)}  ${new Date(v.createdAt).toISOString()}  ${v.size} bytes${name}`)
+    }
   }
 
   const program = new Command()
@@ -234,14 +375,57 @@ export function createProgram(deps: ProgramDeps = {}): Command {
   // -- cat --------------------------------------------------------------------
   program
     .command('cat')
-    .description('print a doc (working view) to stdout')
-    .argument('<doc>', 'doc id or URL')
+    .description('print a doc or HTML asset to stdout')
+    .argument('<target>', 'doc id/URL, asset URL, or asset filename with --folder/--doc')
     .option('--clean', 'strip pending suggested insertions ("reject all" view)')
+    .option('--version <id>', 'print a specific doc or asset version')
+    .option('--folder <folderRef>', 'treat <target> as an asset filename in this folder/vault')
+    .option('--doc <doc>', 'treat <target> as an asset filename in this doc/legacy namespace')
     .option('--json', 'machine-readable output')
-    .action(async (doc: string, opts: { clean?: boolean; json?: boolean }) => {
-      const docId = parseDocRef(doc)
+    .action(async (targetArg: string, opts: { clean?: boolean; version?: string; folder?: string; doc?: string; json?: boolean }) => {
+      const asset = await resolveAssetTarget(targetArg, opts)
+      const api = apiFor()
+      if (asset) {
+        if (opts.clean) throw new CliError(1, '--clean is only valid for markdown docs')
+        const downloaded = await downloadAsset(api, asset, opts.version)
+        const text = new TextDecoder().decode(downloaded.data)
+        if (opts.json) {
+          out(
+            JSON.stringify(
+              {
+                target: 'asset',
+                scope: asset.scope,
+                id: asset.id,
+                filename: asset.filename,
+                versionId: opts.version ?? null,
+                contentType: downloaded.contentType,
+                etag: downloaded.etag,
+                text,
+              },
+              null,
+              2,
+            ),
+          )
+          return
+        }
+        out(text)
+        return
+      }
+
+      if (opts.folder || opts.doc) throw new CliError(1, 'asset scope options require an asset filename')
+      if (opts.clean && opts.version) throw new CliError(1, 'use either --clean or --version, not both')
+      const docId = parseDocRef(targetArg)
+      if (opts.version) {
+        const text = await api.getVersionText(docId, opts.version)
+        if (opts.json) {
+          out(JSON.stringify({ docId, versionId: opts.version, text }, null, 2))
+          return
+        }
+        out(text)
+        return
+      }
       const view = opts.clean ? 'clean' : 'working'
-      const content = await apiFor().getContent(docId, view)
+      const content = await api.getContent(docId, view)
       if (opts.json) {
         out(JSON.stringify({ docId, view, text: content.text, versionId: content.versionId }, null, 2))
         return
@@ -662,47 +846,104 @@ export function createProgram(deps: ProgramDeps = {}): Command {
       if (exitCode !== 0) throw new CliError(exitCode, `sync finished with problems (exit ${exitCode})`)
     })
 
+  // -- history ----------------------------------------------------------------
+  program
+    .command('history')
+    .description('list saved versions for a doc or HTML asset')
+    .argument('<target>', 'doc id/URL, asset URL, or asset filename with --folder/--doc')
+    .option('--folder <folderRef>', 'treat <target> as an asset filename in this folder/vault')
+    .option('--doc <doc>', 'treat <target> as an asset filename in this doc/legacy namespace')
+    .option('--json', 'machine-readable output')
+    .action(async (targetArg: string, opts: { folder?: string; doc?: string; json?: boolean }) => {
+      const asset = await resolveAssetTarget(targetArg, opts)
+      const api = apiFor()
+      if (asset) {
+        const versions = await listAssetVersions(api, asset)
+        if (opts.json) {
+          out(JSON.stringify(versions, null, 2))
+          return
+        }
+        printAssetVersions(versions)
+        return
+      }
+      const docId = parseDocRef(targetArg)
+      const versions = await api.listVersions(docId)
+      if (opts.json) {
+        out(JSON.stringify(versions, null, 2))
+        return
+      }
+      printDocVersions(versions)
+    })
+
   // -- comments ---------------------------------------------------------------
   program
     .command('comments')
-    .description('list open comment threads with their anchor quotes')
-    .argument('<doc>', 'doc id or URL')
+    .description('list open comment threads for a doc or HTML asset')
+    .argument('<target>', 'doc id/URL, asset URL, or asset filename with --folder/--doc')
+    .option('--folder <folderRef>', 'treat <target> as an asset filename in this folder/vault')
+    .option('--doc <doc>', 'treat <target> as an asset filename in this doc/legacy namespace')
     .option('--json', 'machine-readable output')
-    .action(async (doc: string, opts: { json?: boolean }) => {
-      const docId = parseDocRef(doc)
-      const comments = await apiFor().listComments(docId)
+    .action(async (targetArg: string, opts: { folder?: string; doc?: string; json?: boolean }) => {
+      const asset = await resolveAssetTarget(targetArg, opts)
+      const api = apiFor()
+      const comments = asset ? await assetComments(api, asset) : await api.listComments(parseDocRef(targetArg))
       const open = comments.filter((c) => !c.resolved)
       if (opts.json) {
         out(JSON.stringify(open, null, 2))
         return
       }
-      if (open.length === 0) {
-        out('no open comments')
-        return
-      }
-      for (const c of open) {
-        const where = c.anchor ? `"${excerpt(c.anchor.quote.exact)}"` : pc.dim('(doc-level)')
-        const orphaned = c.anchor?.status === 'orphaned' ? pc.yellow(' [orphaned]') : ''
-        out(`${pc.bold(c.id)} ${pc.dim(c.authorName)} ${where}${orphaned}`)
-        out(`  ${c.body}`)
-        for (const r of c.replies) out(`  ↳ ${pc.dim(r.authorName)} ${r.body} ${pc.dim(`(${r.id})`)}`)
-      }
+      printOpenComments(open, asset !== null)
     })
 
   // -- comment ----------------------------------------------------------------
   program
     .command('comment')
-    .description('add a comment, reply to a thread, or resolve one')
-    .argument('<doc>', 'doc id or URL')
+    .description('add a comment, reply to a thread, or resolve one on a doc or HTML asset')
+    .argument('<target>', 'doc id/URL, asset URL, or asset filename with --folder/--doc')
     .option('--body <body>', 'comment text (markdown; @mentions as @[userId])')
     .option('--reply <threadId>', 'reply to an existing thread')
     .option('--resolve <threadId>', 'resolve a thread (with --body: reply first, then resolve)')
     .option('--line <n>', 'anchor a new comment to line N (1-based)', parseIntStrict)
+    .option('--folder <folderRef>', 'treat <target> as an asset filename in this folder/vault')
+    .option('--doc <doc>', 'treat <target> as an asset filename in this doc/legacy namespace')
     .action(
-      async (doc: string, opts: { body?: string; reply?: string; resolve?: string; line?: number }) => {
-        const docId = parseDocRef(doc)
+      async (
+        doc: string,
+        opts: { body?: string; reply?: string; resolve?: string; line?: number; folder?: string; doc?: string },
+      ) => {
+        const asset = await resolveAssetTarget(doc, opts)
         const api = apiFor()
         if (opts.reply && opts.resolve) throw new CliError(1, 'use either --reply or --resolve, not both')
+
+        if (asset) {
+          if (opts.line !== undefined) {
+            throw new CliError(1, '--line is only valid for markdown docs; CLI asset comments are file-level')
+          }
+
+          if (opts.resolve) {
+            if (opts.body) {
+              const reply = await replyToAssetComment(api, asset, opts.resolve, opts.body)
+              out(`replied ${reply.id}`)
+            }
+            await resolveAssetComment(api, asset, opts.resolve, true)
+            out(`resolved ${opts.resolve}`)
+            return
+          }
+
+          if (!opts.body) throw new CliError(1, '--body is required (unless only resolving with --resolve)')
+
+          if (opts.reply) {
+            const reply = await replyToAssetComment(api, asset, opts.reply, opts.body)
+            out(`replied ${reply.id} on thread ${opts.reply}`)
+            return
+          }
+
+          const comment = await createAssetComment(api, asset, opts.body)
+          out(`comment ${comment.id} created on ${assetLabel(asset)} (asset-level)`)
+          return
+        }
+
+        const docId = parseDocRef(doc)
 
         if (opts.resolve) {
           if (opts.body) {
@@ -880,12 +1121,25 @@ export function createProgram(deps: ProgramDeps = {}): Command {
   // -- snapshot ---------------------------------------------------------------
   program
     .command('snapshot')
-    .description('create a named version of the doc')
-    .argument('<doc>', 'doc id or URL')
+    .description('create/name a version of a doc or HTML asset')
+    .argument('<target>', 'doc id/URL, asset URL, or asset filename with --folder/--doc')
     .requiredOption('-m, --message <msg>', 'version name')
-    .action(async (doc: string, opts: { message: string }) => {
-      const docId = parseDocRef(doc)
-      const version = await apiFor().createVersion(docId, opts.message)
+    .option('--version <id>', 'for assets, name this version instead of the current version')
+    .option('--folder <folderRef>', 'treat <target> as an asset filename in this folder/vault')
+    .option('--doc <doc>', 'treat <target> as an asset filename in this doc/legacy namespace')
+    .action(async (targetArg: string, opts: { message: string; version?: string; folder?: string; doc?: string }) => {
+      const asset = await resolveAssetTarget(targetArg, opts)
+      const api = apiFor()
+      if (asset) {
+        const versionId = opts.version ?? (await listAssetVersions(api, asset)).find((v) => v.current)?.id
+        if (!versionId) throw new CliError(1, `no current version found for ${assetLabel(asset)}`)
+        const version = await nameAssetVersion(api, asset, versionId, opts.message)
+        out(`version ${pc.bold(version.id)} named: ${opts.message}`)
+        return
+      }
+      if (opts.version) throw new CliError(1, '--version with snapshot is only valid for assets')
+      const docId = parseDocRef(targetArg)
+      const version = await api.createVersion(docId, opts.message)
       out(`version ${pc.bold(version.id)} created: ${opts.message}`)
     })
 

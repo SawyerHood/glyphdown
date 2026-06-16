@@ -3,13 +3,19 @@ import * as Y from 'yjs'
 import { materializeSuggestion, resolveAnchor } from '@glyphdown/core'
 import type { Comment, Principal } from '@glyphdown/protocol'
 import {
+  CommentStore,
   MIN_ANCHOR_CHARS,
   ORPHAN_REJECT_NOTE,
+  TextAnchorStrategy,
   type StoredSuggestion,
+  anchorsEqual,
   buildComment,
   buildReply,
   reattachComment,
   revalidateAnchors,
+  revalidateComments,
+  revalidateSuggestions,
+  textCommentAnchors,
   toggleReaction,
   validateRange,
 } from '../src/sidecar.ts'
@@ -27,6 +33,25 @@ function docWith(text: string): Y.Text {
 /** Serialize/deserialize the way the DO stores rows in SQLite. */
 function roundTrip<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
+}
+
+function inMemoryCommentStore(ytext: Y.Text) {
+  const comments: Comment[] = []
+  const broadcasts: Comment[] = []
+  const store = new CommentStore({
+    content: () => ytext,
+    strategy: TextAnchorStrategy,
+    anchors: textCommentAnchors,
+    all: () => comments,
+    load: (id) => comments.find((comment) => comment.id === id) ?? null,
+    save: (comment) => {
+      const index = comments.findIndex((current) => current.id === comment.id)
+      if (index === -1) comments.push(comment)
+      else comments[index] = comment
+    },
+    broadcast: (comment) => broadcasts.push(comment),
+  })
+  return { broadcasts, comments, store }
 }
 
 const BASE = 'para one: alpha bravo charlie\n\npara two: delta echo foxtrot\n\npara three: golf hotel india'
@@ -129,6 +154,70 @@ describe('buildReply / toggleReaction / reattachComment', () => {
     expect(resolveAnchor(ytext, reattached.value.anchor!)).toEqual({ start, end: start + 'delta echo'.length })
 
     expect(reattachComment(ytext, orphaned, { start: 0, end: 3 }).ok).toBe(false)
+  })
+})
+
+describe('TextAnchorStrategy / CommentStore', () => {
+  it('builds equivalent text anchors through the strategy', () => {
+    const ytext = docWith(BASE)
+    const direct = buildComment(ytext, user, 'body', { start: 0, end: 12 })
+    const viaStrategy = TextAnchorStrategy.buildFromInput(ytext, { start: 0, end: 12 })
+    expect(direct.ok).toBe(true)
+    expect(viaStrategy.ok).toBe(true)
+    if (!direct.ok || !viaStrategy.ok || viaStrategy.value === null) return
+    expect(TextAnchorStrategy.minimumOk(viaStrategy.value)).toBe(true)
+    expect(anchorsEqual(direct.value.anchor!, viaStrategy.value)).toBe(true)
+  })
+
+  it('persists and broadcasts shared comment mutations', () => {
+    const ytext = docWith(BASE)
+    const { broadcasts, comments, store } = inMemoryCommentStore(ytext)
+
+    const created = store.create(user, 'initial comment', { start: 0, end: 12 })
+    expect(created.ok).toBe(true)
+    if (!created.ok) return
+    expect(comments).toHaveLength(1)
+    expect(broadcasts).toHaveLength(1)
+
+    const reply = store.reply(created.value.id, agent, 'reply')
+    expect(reply.ok).toBe(true)
+    if (!reply.ok) return
+    expect(reply.value.reply.authorId).toBe('a1')
+    expect(reply.value.rootAuthorId).toBe('u1')
+    expect(comments[0]!.replies).toHaveLength(1)
+
+    const reacted = store.react(created.value.id, 'ship', user)
+    expect(reacted.ok).toBe(true)
+    expect(comments[0]!.reactions).toEqual({ ship: ['u1'] })
+
+    const resolved = store.resolve(created.value.id, true)
+    expect(resolved.ok).toBe(true)
+    if (resolved.ok) expect(resolved.value.resolved).toBe(true)
+    expect(comments[0]!.resolved).toBe(true)
+
+    const start = BASE.indexOf('delta echo')
+    const reattached = store.reattach(created.value.id, { start, end: start + 'delta echo'.length })
+    expect(reattached.ok).toBe(true)
+    if (reattached.ok) expect(reattached.value.anchor?.quote.exact).toBe('delta echo')
+    expect(broadcasts).toHaveLength(5)
+  })
+
+  it('revalidates comments without suggestion handling', () => {
+    const ytext = docWith(BASE)
+    const comment = commentOn(ytext, 'golf hotel india')
+    const moved = 'para three: golf hotel india\n\npara one: alpha bravo charlie'
+    ytext.doc!.transact(() => {
+      ytext.delete(0, ytext.length)
+      ytext.insert(0, moved)
+    })
+
+    const changed = revalidateComments(ytext, [comment], TextAnchorStrategy, textCommentAnchors)
+    expect(changed).toHaveLength(1)
+    expect(changed[0]!.anchor?.status).toBe('anchored')
+    expect(resolveAnchor(ytext, changed[0]!.anchor!)).toEqual({
+      start: 12,
+      end: 12 + 'golf hotel india'.length,
+    })
   })
 })
 
@@ -276,5 +365,20 @@ describe('revalidateAnchors', () => {
     const result = revalidateAnchors(ytext, [], [roundTrip(suggestion)])
     expect(result.suggestions).toEqual([])
     expect(result.rejected).toEqual([])
+  })
+
+  it('revalidates suggestions without comment handling', () => {
+    const ytext = docWith(BASE)
+    const target = BASE.replace('golf', 'SUGGESTED golf')
+    const suggestion: StoredSuggestion = {
+      ...materializeSuggestion(ytext, target, { id: 's4', authorId: agent.id, createdAt: 1 }),
+      authorName: agent.name,
+    }
+
+    ytext.insert(0, 'INTRO\n\n')
+    const result = revalidateSuggestions(ytext, [roundTrip(suggestion)])
+    expect(result.rejected).toEqual([])
+    expect(result.suggestions).toHaveLength(1)
+    expect(result.suggestions[0]!.id).toBe('s4')
   })
 })

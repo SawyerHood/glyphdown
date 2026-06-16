@@ -181,7 +181,13 @@ export default function FileBrowser({ folderId }: { folderId: string | null }) {
   }
 
   const handleFileDrop = async (files: FileList) => {
-    if (currentFolder === null || fileDropBusy) return
+    if (fileDropBusy) return
+    if (currentFolder === null) {
+      // We still intercepted the drop (so the browser doesn't just open the
+      // file), but assets are folder-scoped — point the user at a folder.
+      showToast('Open a folder to upload files here.')
+      return
+    }
     setFileDropBusy(true)
     const result: DropImportResult = {
       images: 0,
@@ -253,8 +259,11 @@ export default function FileBrowser({ folderId }: { folderId: string | null }) {
   handleFileDropRef.current = handleFileDrop
 
   useEffect(() => {
+    // Any OS file drag (not an internal doc/folder reorder). We intercept these
+    // ANYWHERE on the browser page — including the vault root where there is no
+    // current folder — so the browser never hijacks the drop and opens the file
+    // in a new tab; handleFileDrop then uploads (in a folder) or guides the user.
     const osFiles = (dt: DataTransfer | null) =>
-      currentFolderRef.current !== null &&
       dt !== null &&
       dt.types.includes('Files') &&
       !dt.types.includes(DOC_DRAG_MIME) &&

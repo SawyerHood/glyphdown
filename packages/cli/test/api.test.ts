@@ -164,6 +164,95 @@ describe('share links', () => {
   })
 })
 
+describe('versions and asset comments', () => {
+  it('lists doc versions and reads a specific doc version', async () => {
+    const version = { id: 'v1', createdAt: 1, authorIds: ['u1'], kind: 'named', sizeBytes: 8 }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ versions: [version] }))
+      .mockResolvedValueOnce(jsonResponse({ text: 'a\r\nb\r\n' })) as unknown as typeof fetch
+    const api = apiWith(fetchMock)
+
+    await expect(api.listVersions('doc1')).resolves.toEqual([version])
+    await expect(api.getVersionText('doc1', 'v1')).resolves.toBe('a\nb\n')
+
+    const calls = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls as Array<[string, RequestInit]>
+    expect(calls.map(([url, init]) => `${init.method} ${url}`)).toEqual([
+      `GET ${SERVER}/api/docs/doc1/versions`,
+      `GET ${SERVER}/api/docs/doc1/versions/v1`,
+    ])
+  })
+
+  it('uses the filename-addressed asset comment routes', async () => {
+    const comment = { id: 'c1' }
+    const reply = { id: 'r1' }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ comments: [comment] }))
+      .mockResolvedValueOnce(jsonResponse(comment))
+      .mockResolvedValueOnce(jsonResponse(reply))
+      .mockResolvedValueOnce(jsonResponse({ resolved: true })) as unknown as typeof fetch
+    const api = apiWith(fetchMock)
+
+    await expect(api.listDocAssetComments('doc1', 'page.html')).resolves.toEqual([comment])
+    await expect(api.createFolderAssetComment('f1', 'page.html', { body: 'file note' })).resolves.toEqual(comment)
+    await expect(api.replyToDocAssetComment('doc1', 'page.html', 'c1', 'fixed')).resolves.toEqual(reply)
+    await api.resolveFolderAssetComment('f1', 'page.html', 'c1')
+
+    const calls = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls as Array<[string, RequestInit]>
+    expect(calls.map(([url, init]) => `${init.method} ${url}`)).toEqual([
+      `GET ${SERVER}/api/docs/doc1/assets/page.html/comments`,
+      `POST ${SERVER}/api/folders/f1/assets/page.html/comments`,
+      `POST ${SERVER}/api/docs/doc1/assets/page.html/comments/c1/replies`,
+      `POST ${SERVER}/api/folders/f1/assets/page.html/comments/c1/resolve`,
+    ])
+    expect(JSON.parse(calls[1]![1].body as string)).toEqual({ body: 'file note' })
+    expect(JSON.parse(calls[3]![1].body as string)).toEqual({ resolved: true })
+  })
+
+  it('lists, names, and downloads asset versions', async () => {
+    const version = {
+      id: 'av1',
+      assetId: 'a1',
+      contentHash: 'hash',
+      size: 12,
+      etag: 'etag',
+      createdBy: 'u1',
+      createdAt: 1,
+      current: true,
+    }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ versions: [version] }))
+      .mockResolvedValueOnce(jsonResponse({ ...version, message: 'Baseline' }))
+      .mockResolvedValueOnce(
+        new Response(new Uint8Array([60, 104, 49, 62]), {
+          status: 200,
+          headers: { 'content-type': 'text/html', etag: '"etag-old"' },
+        }),
+      ) as unknown as typeof fetch
+    const api = apiWith(fetchMock)
+
+    await expect(api.listFolderAssetVersions('f1', 'page.html')).resolves.toEqual([version])
+    await expect(api.nameDocAssetVersion('doc1', 'page.html', 'av1', 'Baseline')).resolves.toMatchObject({
+      id: 'av1',
+      message: 'Baseline',
+    })
+    await expect(api.downloadFolderAsset('f1', 'page.html', 'av/old')).resolves.toMatchObject({
+      data: new Uint8Array([60, 104, 49, 62]),
+      etag: 'etag-old',
+      contentType: 'text/html',
+    })
+
+    const calls = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls as Array<[string, RequestInit]>
+    expect(calls.map(([url, init]) => `${init.method} ${url}`)).toEqual([
+      `GET ${SERVER}/api/folders/f1/assets/page.html/versions`,
+      `POST ${SERVER}/api/docs/doc1/assets/page.html/versions/av1/name`,
+      `GET ${SERVER}/api/folders/f1/assets/page.html?version=av%2Fold`,
+    ])
+  })
+})
+
 describe('pushWithBase', () => {
   const ok: PushResponse = { ok: true, mode: 'edit', applied: 1, failedHunks: [], versionId: 'v2' }
 

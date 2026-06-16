@@ -325,7 +325,7 @@ export async function revokeInvite(db: Db, token: string, principal: Principal):
 export async function sendMentionEmails(
   db: Db,
   userIds: string[],
-  opts: { byName: string; docId: string; docTitle: string; excerpt: string; origin: string },
+  opts: { byName: string; docId?: string; docTitle: string; excerpt: string; origin: string; deepLink?: string },
   emailEnv: EmailEnv,
 ): Promise<void> {
   for (const userId of userIds) {
@@ -341,7 +341,7 @@ export async function sendMentionEmails(
             byName: opts.byName,
             docTitle: opts.docTitle,
             excerpt: opts.excerpt,
-            url: `${opts.origin}/d/${opts.docId}`,
+            url: `${opts.origin}${opts.deepLink ?? `/d/${encodeURIComponent(opts.docId ?? '')}`}`,
           }),
         },
         { env: emailEnv },

@@ -287,12 +287,43 @@ export const assets = sqliteTable(
     size: integer('size').notNull(),
     /** R2 etag of the stored object — lets list endpoints expose change detection without R2 head() calls. */
     etag: text('etag').notNull(),
+    /** Nullable until legacy assets are lazily backfilled into asset_versions. */
+    currentVersionId: text('current_version_id').references((): AnySQLiteColumn => assetVersions.id, { onDelete: 'set null' }),
     createdBy: text('created_by').notNull(),
     createdAt: integer('created_at').notNull(),
   },
   (t) => [
     uniqueIndex('assets_folder_filename_idx').on(t.folderId, t.filename),
     uniqueIndex('assets_doc_filename_idx').on(t.docId, t.filename),
+  ],
+)
+
+export const contentObjects = sqliteTable('content_objects', {
+  /** SHA-256 hex; bytes live in R2 at asset-blobs/sha256/<hash>. */
+  hash: text('hash').primaryKey(),
+  size: integer('size').notNull(),
+  refcount: integer('refcount').notNull(),
+})
+
+export const assetVersions = sqliteTable(
+  'asset_versions',
+  {
+    id: text('id').primaryKey(),
+    assetId: text('asset_id')
+      .notNull()
+      .references(() => assets.id, { onDelete: 'cascade' }),
+    contentHash: text('content_hash')
+      .notNull()
+      .references(() => contentObjects.hash),
+    size: integer('size').notNull(),
+    etag: text('etag').notNull(),
+    createdBy: text('created_by').notNull(),
+    createdAt: integer('created_at').notNull(),
+    message: text('message'),
+  },
+  (t) => [
+    index('asset_versions_asset_idx').on(t.assetId),
+    index('asset_versions_content_hash_idx').on(t.contentHash),
   ],
 )
 

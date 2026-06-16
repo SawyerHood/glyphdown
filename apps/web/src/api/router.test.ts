@@ -29,8 +29,8 @@ const h = vi.hoisted(() => {
       objects.delete(key)
     },
   }
-  /** Every Worker->DO fetch: which namespace, DO name, path, JSON body. */
-  const doCalls: Array<{ ns: string; name: string; path: string; body: unknown }> = []
+  /** Every Worker->DO fetch: which namespace, DO name, path, JSON body, trusted headers. */
+  const doCalls: Array<{ ns: string; name: string; path: string; body: unknown; headers: Record<string, string | null> }> = []
   const state = { db: null as unknown as Db }
   return { objects, bucket, doCalls, state }
 })
@@ -48,12 +48,32 @@ vi.mock('partyserver', async (importOriginal) => ({
       } catch {
         body = null
       }
-      h.doCalls.push({ ns: ns.__ns, name, path: new URL(req.url).pathname, body })
+      const path = new URL(req.url).pathname
+      h.doCalls.push({
+        ns: ns.__ns,
+        name,
+        path,
+        body,
+        headers: {
+          principal: req.headers.get('x-glyphdown-principal'),
+          role: req.headers.get('x-glyphdown-role'),
+          asset: req.headers.get('x-glyphdown-asset'),
+          version: req.headers.get('x-glyphdown-asset-version'),
+          contentType: req.headers.get('content-type'),
+        },
+      })
       // One shape serves every stubbed DO: results for SearchDO /search,
       // docIds for SearchDO /backlinks, ok for DocDO admin calls.
-      return new Response(JSON.stringify({ ok: true, results: [], docIds: [] }), {
-        headers: { 'content-type': 'application/json' },
-      })
+      const headers = new Headers({ 'content-type': 'application/json' })
+      if (path.endsWith('/replies')) headers.set('x-glyphdown-comment-author', 'alice')
+      const replyBody =
+        typeof body === 'object' && body !== null && 'body' in body ? (body as { body?: unknown }).body : ''
+      const responseBody = path.endsWith('/replies')
+        ? { id: 'reply-1', body: replyBody }
+        : path === '/comments' && req.method === 'POST'
+          ? { id: 'comment-1' }
+          : { ok: true, results: [], docIds: [] }
+      return new Response(JSON.stringify(responseBody), { headers })
     },
   }),
 }))
@@ -66,6 +86,7 @@ import { env as stubEnv } from 'cloudflare:workers'
 Object.assign(stubEnv as unknown as Record<string, unknown>, {
   ASSETS: h.bucket,
   DocDO: { __ns: 'DocDO' },
+  HtmlDocDO: { __ns: 'HtmlDocDO' },
   SearchDO: { __ns: 'SearchDO' },
 })
 
@@ -93,9 +114,14 @@ function setupDb(): Db {
       role TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, revoked_at INTEGER);
     CREATE TABLE assets (id TEXT PRIMARY KEY, folder_id TEXT, doc_id TEXT, filename TEXT NOT NULL,
       r2_key TEXT NOT NULL, content_type TEXT NOT NULL, size INTEGER NOT NULL, etag TEXT NOT NULL,
-      created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
+      current_version_id TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL);
     CREATE UNIQUE INDEX assets_folder_filename_idx ON assets (folder_id, filename);
     CREATE UNIQUE INDEX assets_doc_filename_idx ON assets (doc_id, filename);
+    CREATE TABLE content_objects (hash TEXT PRIMARY KEY, size INTEGER NOT NULL, refcount INTEGER NOT NULL);
+    CREATE TABLE asset_versions (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, content_hash TEXT NOT NULL,
+      size INTEGER NOT NULL, etag TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, message TEXT);
+    CREATE INDEX asset_versions_asset_idx ON asset_versions (asset_id);
+    CREATE INDEX asset_versions_content_hash_idx ON asset_versions (content_hash);
     CREATE TABLE notifications (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, type TEXT NOT NULL,
       payload_json TEXT NOT NULL, created_at INTEGER NOT NULL, read_at INTEGER);
     CREATE TABLE user_prefs (user_id TEXT PRIMARY KEY, email_notifications INTEGER NOT NULL DEFAULT 1,
@@ -106,6 +132,17 @@ function setupDb(): Db {
   // (each drizzle query builder is a thenable).
   ;(db as unknown as { batch: (queries: Array<PromiseLike<unknown>>) => Promise<void> }).batch = async (queries) => {
     for (const q of queries) await q
+  }
+  ;(db as unknown as { transaction: (fn: (tx: Db) => Promise<unknown>) => Promise<unknown> }).transaction = async (fn) => {
+    sqlite.exec('BEGIN')
+    try {
+      const result = await fn(db)
+      sqlite.exec('COMMIT')
+      return result
+    } catch (err) {
+      sqlite.exec('ROLLBACK')
+      throw err
+    }
   }
   return db
 }
@@ -133,6 +170,10 @@ function principalFor(userId: string): Record<string, string> {
 
 function api(path: string, init?: RequestInit & { headers?: Record<string, string> }): Promise<Response | null> {
   return handleApi(new Request(`https://glyphdown.test${path}`, init))
+}
+
+function contentKey(text: string): string {
+  return `asset-blobs/sha256/${createHash('sha256').update(text).digest('hex')}`
 }
 
 async function jsonOf<T>(res: Response | null): Promise<T> {
@@ -387,6 +428,30 @@ describe('GET /api/folders/:id/assets with an inherited grant', () => {
     expect(new TextDecoder().decode(await stream!.arrayBuffer())).toBe('<!doctype html>')
   })
 
+  it('serves the injected commenting view to share callers via header-only token delivery', async () => {
+    principalFor('alice')
+    seedVault('v1', 'alice')
+    seedFolder('sub', 'alice', 'v1')
+    seedShareLink('tok-v1', 'folder', 'v1')
+    raw.prepare(`INSERT INTO assets (id, folder_id, doc_id, filename, r2_key, content_type, size, etag, created_by, created_at)
+                 VALUES ('a-html', 'sub', NULL, 'page.html', 'folder/sub/page.html', 'text/html', 15, 'e-html', 'alice', 1)`).run()
+    h.objects.set('folder/sub/page.html', { bytes: new TextEncoder().encode('<!doctype html><h1>Report</h1>'), contentType: 'text/html' })
+
+    const res = await api('/api/folders/sub/assets/page.html/commenting-view', {
+      headers: { 'x-glyphdown-share': 'tok-v1' },
+    })
+    expect(res!.status).toBe(200)
+    expect(res!.headers.get('content-security-policy')).toBe('sandbox allow-scripts')
+    expect(res!.headers.get('cache-control')).toBe('private, no-store')
+    expect(res!.headers.get('x-glyphdown-view-nonce')).toMatch(/^[a-f0-9]{32}$/)
+    const html = await res!.text()
+    expect(html).toContain('data-glyphdown-runtime')
+    expect(html).toContain('<base href="/api/folders/sub/assets/page.html">')
+    expect(html).toContain('<h1>Report</h1>')
+    expect(html).not.toContain('tok-v1')
+    expect(html).not.toContain('share=')
+  })
+
   it('rejects missing, invalid, and revoked anonymous share tokens for folder assets', async () => {
     principalFor('alice')
     seedVault('v1', 'alice')
@@ -443,11 +508,24 @@ describe('POST /api/folders/:id/assets', () => {
       body: '<!doctype html>',
     })
     expect(uploaded!.status).toBe(200)
-    expect(await jsonOf<{ asset: { filename: string; contentType: string }; path: string }>(uploaded)).toMatchObject({
+    const body = await jsonOf<{ asset: { id: string; filename: string; contentType: string }; path: string }>(uploaded)
+    expect(body).toMatchObject({
       asset: { filename: 'page.html', contentType: 'text/html' },
       path: 'page.html',
     })
-    expect(h.objects.has('folder/sub/page.html')).toBe(true)
+    expect(h.objects.has(contentKey('<!doctype html>'))).toBe(true)
+    const contentRefresh = h.doCalls.find((c) => c.ns === 'HtmlDocDO' && c.path === '/admin/content')
+    expect(contentRefresh).toMatchObject({
+      ns: 'HtmlDocDO',
+      name: body.asset.id,
+      path: '/admin/content',
+      body: {
+        etag: `etag-${contentKey('<!doctype html>')}`,
+        contentHash: createHash('sha256').update('<!doctype html>').digest('hex'),
+        html: '<!doctype html>',
+      },
+      headers: { role: 'editor', asset: body.asset.id, contentType: 'application/json' },
+    })
   })
 })
 
@@ -515,6 +593,168 @@ describe('asset folder→doc read fallback', () => {
     seedDoc('d-other', 'alice', 'b.md', 'other')
     seedLegacyAsset('d-other', 'pic.png', [7])
     expect((await api('/api/folders/v1/assets/pic.png', { headers }))!.status).toBe(404)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// HTML asset comments (filename-addressed route → HtmlDocDO by asset id)
+// ---------------------------------------------------------------------------
+
+function seedHtmlAsset(
+  id: string,
+  folderId: string | null,
+  docId: string | null,
+  filename = 'page.html',
+  currentVersionId: string | null = null,
+): void {
+  raw.prepare(
+    `INSERT INTO assets (id, folder_id, doc_id, filename, r2_key, content_type, size, etag, current_version_id, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, 'text/html', 15, 'e-html', ?, 'alice', 1)`,
+  ).run(id, folderId, docId, filename, folderId ? `folder/${folderId}/${filename}` : `doc/${docId}/${filename}`, currentVersionId)
+}
+
+describe('HTML asset comment routes', () => {
+  it('forwards folder asset comments to HtmlDocDO by immutable asset id with trusted headers', async () => {
+    principalFor('alice')
+    const bob = principalFor('bob')
+    seedVault('v1', 'alice')
+    seedFolder('sub', 'alice', 'v1')
+    grantFolder('v1', 'bob', 'commenter')
+    seedHtmlAsset('a-html', 'sub', null)
+
+    const res = await api('/api/folders/sub/assets/page.html/comments', {
+      method: 'POST',
+      headers: { ...bob, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'Looks good' }),
+    })
+    expect(res!.status).toBe(200)
+
+    const call = h.doCalls.find((c) => c.ns === 'HtmlDocDO')
+    expect(call).toMatchObject({
+      ns: 'HtmlDocDO',
+      name: 'a-html',
+      path: '/comments',
+      body: { body: 'Looks good' },
+      headers: { role: 'commenter', asset: 'a-html', contentType: 'application/json' },
+    })
+    expect(JSON.parse(call!.headers.principal!)).toMatchObject({ id: 'agent-bob', ownerUserId: 'bob' })
+  })
+
+  it('forwards the current asset version id when creating asset comments', async () => {
+    principalFor('alice')
+    const bob = principalFor('bob')
+    seedVault('v1', 'alice')
+    seedFolder('sub', 'alice', 'v1')
+    grantFolder('v1', 'bob', 'commenter')
+    seedHtmlAsset('a-html', 'sub', null, 'page.html', 'version-current')
+
+    const res = await api('/api/folders/sub/assets/page.html/comments', {
+      method: 'POST',
+      headers: { ...bob, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'Versioned comment' }),
+    })
+    expect(res!.status).toBe(200)
+    expect(h.doCalls.at(-1)).toMatchObject({
+      ns: 'HtmlDocDO',
+      name: 'a-html',
+      path: '/comments',
+      headers: { asset: 'a-html', version: 'version-current' },
+    })
+  })
+
+  it('lets signed-in folder-share commenters write but rejects anonymous writes', async () => {
+    principalFor('alice')
+    const bob = principalFor('bob')
+    seedVault('v1', 'alice')
+    seedFolder('sub', 'alice', 'v1')
+    seedShareLink('tok-comment', 'folder', 'v1', 'commenter')
+    seedHtmlAsset('a-html', 'sub', null)
+
+    const signedIn = await api('/api/folders/sub/assets/page.html/comments?share=tok-comment', {
+      method: 'POST',
+      headers: { ...bob, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'link-authorized' }),
+    })
+    expect(signedIn!.status).toBe(200)
+    expect(h.doCalls.at(-1)).toMatchObject({ ns: 'HtmlDocDO', name: 'a-html', path: '/comments' })
+    expect(h.doCalls.at(-1)!.headers.role).toBe('commenter')
+
+    const anonymous = await api('/api/folders/sub/assets/page.html/comments?share=tok-comment', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'anonymous' }),
+    })
+    expect(anonymous!.status).toBe(401)
+  })
+
+  it('allows anonymous viewer share links to read folder asset comments', async () => {
+    principalFor('alice')
+    seedVault('v1', 'alice')
+    seedFolder('sub', 'alice', 'v1')
+    seedShareLink('tok-view', 'folder', 'v1', 'viewer')
+    seedHtmlAsset('a-html', 'sub', null)
+
+    const res = await api('/api/folders/sub/assets/page.html/comments?share=tok-view')
+    expect(res!.status).toBe(200)
+    expect(h.doCalls.at(-1)).toMatchObject({ ns: 'HtmlDocDO', name: 'a-html', path: '/comments' })
+    expect(h.doCalls.at(-1)!.headers.role).toBe('viewer')
+    expect(JSON.parse(h.doCalls.at(-1)!.headers.principal!)).toMatchObject({ id: 'anonymous' })
+  })
+
+  it('resolves legacy doc-scoped asset rows through the doc comments surface', async () => {
+    const alice = principalFor('alice')
+    seedVault('v1', 'alice')
+    seedDoc('d1', 'alice', 'a.md', 'v1')
+    seedHtmlAsset('a-legacy', null, 'd1')
+
+    const res = await api('/api/docs/d1/assets/page.html/comments', { headers: alice })
+    expect(res!.status).toBe(200)
+    expect(h.doCalls.at(-1)).toMatchObject({ ns: 'HtmlDocDO', name: 'a-legacy', path: '/comments' })
+    expect(h.doCalls.at(-1)!.headers.asset).toBe('a-legacy')
+  })
+
+  it('writes asset-targeted mention and reply notifications', async () => {
+    principalFor('alice')
+    const bob = principalFor('bob')
+    seedVault('v1', 'alice')
+    raw.prepare(`UPDATE user_prefs SET email_notifications = 0 WHERE user_id = 'alice'`).run()
+    seedFolder('sub', 'alice', 'v1')
+    grantFolder('v1', 'bob', 'commenter')
+    seedHtmlAsset('a-html', 'sub', null)
+
+    const mentioned = await api('/api/folders/sub/assets/page.html/comments', {
+      method: 'POST',
+      headers: { ...bob, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: '@[alice] please check' }),
+    })
+    expect(mentioned!.status).toBe(200)
+
+    const replied = await api('/api/folders/sub/assets/page.html/comments/c1/replies', {
+      method: 'POST',
+      headers: { ...bob, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'replying' }),
+    })
+    expect(replied!.status).toBe(200)
+
+    const rows = raw.prepare(`SELECT type, payload_json FROM notifications WHERE user_id = 'alice' ORDER BY rowid`).all() as Array<{
+      type: string
+      payload_json: string
+    }>
+    expect(rows.map((row) => row.type)).toEqual(['mention', 'comment-reply'])
+    expect(JSON.parse(rows[0]!.payload_json)).toMatchObject({
+      assetId: 'a-html',
+      assetTitle: 'page.html',
+      folderId: 'sub',
+      filename: 'page.html',
+      deepLink: '/f/sub/file/page.html',
+      commentId: 'comment-1',
+      by: 'agent-bob',
+    })
+    expect(JSON.parse(rows[1]!.payload_json)).toMatchObject({
+      assetId: 'a-html',
+      commentId: 'reply-1',
+      excerpt: 'replying',
+    })
   })
 })
 

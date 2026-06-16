@@ -3,9 +3,11 @@ import type {
   AssetMeta,
   Comment,
   CommentReply,
+  CreateAssetCommentRequest,
   DocMeta,
   FolderListingResponse,
   FolderMeta,
+  NodeAnchor,
   Principal,
   PushResponse,
   Role,
@@ -270,8 +272,8 @@ export const revokeShareLink = (docId: string, token: string) =>
 
 const folderPath = (id: string, sub = '') => `/api/folders/${encodeURIComponent(id)}${sub}`
 
-export const listFolderMembers = (folderId: string) =>
-  request<{ members: MemberInfo[] }>(folderPath(folderId, '/members')).then((r) => r.members)
+export const listFolderMembers = (folderId: string, share?: string) =>
+  request<{ members: MemberInfo[] }>(folderPath(folderId, '/members'), { share }).then((r) => r.members)
 
 export const addFolderMember = (folderId: string, input: { email?: string; agentId?: string; role: Role }) =>
   request<{ principalId: string; principalType: string; role: Role }>(folderPath(folderId, '/members'), {
@@ -426,6 +428,134 @@ export const reattachComment = (docId: string, commentId: string, range: { start
   })
 
 // ---------------------------------------------------------------------------
+// Asset comments (REST + polling; HtmlDocDO behind the Worker)
+// ---------------------------------------------------------------------------
+
+const docAssetComments = (docId: string, filename: string, sub = '') =>
+  doc(docId, `/assets/${encodeURIComponent(filename)}/comments${sub}`)
+
+const folderAssetComments = (folderId: string, filename: string, sub = '') =>
+  `${folderAsset(folderId, filename)}/comments${sub}`
+
+export const listAssetComments = (docId: string, filename: string, share?: string) =>
+  request<{ comments: Comment[] }>(docAssetComments(docId, filename), { share }).then((r) => r.comments)
+
+export const createAssetComment = (
+  docId: string,
+  filename: string,
+  input: CreateAssetCommentRequest,
+  share?: string,
+) => request<Comment>(docAssetComments(docId, filename), { method: 'POST', body: input, share })
+
+export const replyToAssetComment = (docId: string, filename: string, commentId: string, body: string, share?: string) =>
+  request<CommentReply>(docAssetComments(docId, filename, `/${encodeURIComponent(commentId)}/replies`), {
+    method: 'POST',
+    body: { body },
+    share,
+  })
+
+export const setAssetCommentResolved = (
+  docId: string,
+  filename: string,
+  commentId: string,
+  resolved: boolean,
+  share?: string,
+) =>
+  request<{ resolved: boolean }>(docAssetComments(docId, filename, `/${encodeURIComponent(commentId)}/resolve`), {
+    method: 'POST',
+    body: { resolved },
+    share,
+  })
+
+export const toggleAssetCommentReaction = (
+  docId: string,
+  filename: string,
+  commentId: string,
+  emoji: string,
+  share?: string,
+) =>
+  request<Comment>(docAssetComments(docId, filename, `/${encodeURIComponent(commentId)}/reactions`), {
+    method: 'POST',
+    body: { emoji },
+    share,
+  })
+
+export const reattachAssetComment = (
+  docId: string,
+  filename: string,
+  commentId: string,
+  input: { nodeAnchor: NodeAnchor },
+  share?: string,
+) =>
+  request<Comment>(docAssetComments(docId, filename, `/${encodeURIComponent(commentId)}/reattach`), {
+    method: 'POST',
+    body: input,
+    share,
+  })
+
+export const listFolderAssetComments = (folderId: string, filename: string, share?: string) =>
+  request<{ comments: Comment[] }>(folderAssetComments(folderId, filename), { share }).then((r) => r.comments)
+
+export const createFolderAssetComment = (
+  folderId: string,
+  filename: string,
+  input: CreateAssetCommentRequest,
+  share?: string,
+) => request<Comment>(folderAssetComments(folderId, filename), { method: 'POST', body: input, share })
+
+export const replyToFolderAssetComment = (
+  folderId: string,
+  filename: string,
+  commentId: string,
+  body: string,
+  share?: string,
+) =>
+  request<CommentReply>(folderAssetComments(folderId, filename, `/${encodeURIComponent(commentId)}/replies`), {
+    method: 'POST',
+    body: { body },
+    share,
+  })
+
+export const setFolderAssetCommentResolved = (
+  folderId: string,
+  filename: string,
+  commentId: string,
+  resolved: boolean,
+  share?: string,
+) =>
+  request<{ resolved: boolean }>(folderAssetComments(folderId, filename, `/${encodeURIComponent(commentId)}/resolve`), {
+    method: 'POST',
+    body: { resolved },
+    share,
+  })
+
+export const toggleFolderAssetCommentReaction = (
+  folderId: string,
+  filename: string,
+  commentId: string,
+  emoji: string,
+  share?: string,
+) =>
+  request<Comment>(folderAssetComments(folderId, filename, `/${encodeURIComponent(commentId)}/reactions`), {
+    method: 'POST',
+    body: { emoji },
+    share,
+  })
+
+export const reattachFolderAssetComment = (
+  folderId: string,
+  filename: string,
+  commentId: string,
+  input: { nodeAnchor: NodeAnchor },
+  share?: string,
+) =>
+  request<Comment>(folderAssetComments(folderId, filename, `/${encodeURIComponent(commentId)}/reattach`), {
+    method: 'POST',
+    body: input,
+    share,
+  })
+
+// ---------------------------------------------------------------------------
 // Suggestions
 // ---------------------------------------------------------------------------
 
@@ -537,6 +667,37 @@ export async function uploadFolderAsset(
 
 export const deleteFolderAsset = (folderId: string, filename: string) =>
   request<{ ok: true }>(folderAsset(folderId, filename), { method: 'DELETE' })
+
+export interface HtmlCommentingView {
+  html: string
+  nonce: string
+}
+
+export async function fetchFolderAssetCommentingView(
+  folderId: string,
+  filename: string,
+  share?: string,
+): Promise<HtmlCommentingView> {
+  const headers: Record<string, string> = {}
+  if (share) headers['x-glyphdown-share'] = share
+  const res = await fetch(`${folderAsset(folderId, filename)}/commenting-view`, {
+    method: 'GET',
+    headers,
+    credentials: 'same-origin',
+  })
+  if (!res.ok) {
+    let code = `http-${res.status}`
+    try {
+      const data = (await res.json()) as { error?: unknown; reason?: unknown }
+      if (typeof data.error === 'string') code = data.error
+      else if (typeof data.reason === 'string') code = data.reason
+    } catch {
+      // non-JSON error body
+    }
+    throw new ApiError(res.status, code)
+  }
+  return { html: await res.text(), nonce: res.headers.get('x-glyphdown-view-nonce') ?? '' }
+}
 
 // ---------------------------------------------------------------------------
 // Versions / history

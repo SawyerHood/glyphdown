@@ -57,6 +57,13 @@
       "when": 1781101363174,
       "tag": "0007_damp_molten_man",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1781575906199,
+      "tag": "0008_adorable_pepper_potts",
+      "breakpoints": true
     }
   ]
 }

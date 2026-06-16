@@ -1,4 +1,4 @@
-import type { DocDO, SearchDO } from '@glyphdown/sync'
+import type { DocDO, HtmlDocDO, SearchDO } from '@glyphdown/sync'
 
 /**
  * Worker bindings + secrets this app reads. Bindings (DB, DocDO) come from
@@ -13,6 +13,7 @@ export interface AppEnv {
   /** R2 bucket for doc/folder image assets (wrangler.jsonc r2_buckets). */
   ASSETS: R2Bucket
   DocDO: DurableObjectNamespace<DocDO>
+  HtmlDocDO: DurableObjectNamespace<HtmlDocDO>
   /** Single global search index DO (full-text + wiki-link backlinks). */
   SearchDO: DurableObjectNamespace<SearchDO>
   BETTER_AUTH_SECRET?: string

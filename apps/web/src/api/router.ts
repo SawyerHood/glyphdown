@@ -2,7 +2,12 @@ import { env, waitUntil } from 'cloudflare:workers'
 import { getServerByName, type Server } from 'partyserver'
 import { and, desc, eq, inArray, isNull, ne } from 'drizzle-orm'
 import {
+  HEADER_ASSET,
+  HEADER_ASSET_VERSION,
+  assetKindForContentType,
   docFilenameStem,
+  roleAtLeast,
+  type CommentTarget,
   type DocMeta,
   type FolderListingFolderMeta,
   type FolderListingResponse,
@@ -35,7 +40,15 @@ import {
   type DocRow,
 } from './roles.ts'
 import { MAX_FOLDER_DEPTH, planFolderDelete, propagateFolderRoles, validateMove } from './folder-tree.ts'
-import { handleDocAssets, handleFolderAssets, listFolderAssetMetaMap } from './assets.ts'
+import {
+  assetScopeFor,
+  fallbackDocIdsFor,
+  handleDocAssets,
+  handleFolderAssets,
+  listFolderAssetMetaMap,
+  resolveAssetRow,
+  type AssetRow,
+} from './assets.ts'
 import { feedTitleToIndex, handleBacklinks, handleSearch, removeFromIndex } from './search.ts'
 import { availableFilename, filenameForCreate, filenameFromPatch } from './filenames.ts'
 import { ensureDefaultVault } from './vaults.ts'
@@ -64,6 +77,8 @@ const FORWARDABLE: ReadonlyArray<{ method: string; pattern: RegExp }> = [
   { method: 'GET', pattern: /^\/versions\/[^/]+$/ },
   { method: 'POST', pattern: /^\/versions\/[^/]+\/restore$/ },
 ]
+
+const ASSET_COMMENT_PATH = /^\/assets\/([^/]+)\/comments(\/.*)?$/
 
 /** Accept both protocol role names and SPEC §4 share-link verbs. */
 const ROLE_ALIASES: Record<string, Role> = {
@@ -293,6 +308,9 @@ async function handleDocScoped(
       emailEnv(),
     )
   }
+  if (isAssetCommentPath(subPath)) {
+    return handleDocAssetComments(db, request, url, access.doc, auth, subPath)
+  }
   if (subPath === '/assets' || subPath.startsWith('/assets/')) {
     return handleDocAssets(db, asAppEnv(env).ASSETS, request, url, access.doc, auth, subPath)
   }
@@ -317,8 +335,9 @@ async function handleDocScoped(
     const bodyText = await request.text()
     const response = await forwardToDoc(request, docId, subPath, url.search, auth, bodyText)
     if (response.ok) {
-      const mentioned = await notifyMentions(db, bodyText, response, access.doc, auth.principal, url.origin)
-      if (isReply) await notifyCommentReply(db, response, access.doc, auth.principal, mentioned)
+      const target = docCommentTarget(access.doc)
+      const mentioned = await notifyMentions(db, bodyText, response, target, auth.principal, url.origin)
+      if (isReply) await notifyCommentReply(db, response, target, auth.principal, mentioned)
     }
     return response
   }
@@ -683,6 +702,17 @@ async function handleFolders(db: Db, request: Request, url: URL): Promise<Respon
   // mutations continue through the authenticated route below.
   const sharedAssetMatch = url.pathname.match(/^\/api\/folders\/([^/]+)(\/assets(?:\/.*)?)$/)
   if (sharedAssetMatch && request.method === 'GET') {
+    if (isAssetCommentPath(sharedAssetMatch[2]!)) {
+      return handleFolderAssetComments(
+        db,
+        request,
+        url,
+        sharedAssetMatch[1]!,
+        sharedAssetMatch[2]!,
+        principal,
+        shareTokenFrom(url, request),
+      )
+    }
     return folderAssetRead(
       db,
       request,
@@ -717,6 +747,9 @@ async function handleFolders(db: Db, request: Request, url: URL): Promise<Respon
   const isOwner = folderRole === 'owner'
   const auth: AuthContext = { principal, role: folderRole ?? 'viewer' }
 
+  if (isAssetCommentPath(subPath)) {
+    return handleFolderAssetComments(db, request, url, folder.id, subPath, principal, shareTokenFrom(url, request), folder)
+  }
   if (subPath === '/assets' || subPath.startsWith('/assets/')) {
     // Folder-role check (used by CLI pull/sync and the sidebar): owner or
     // any folder member may list/download — INHERITED grants included (a
@@ -814,6 +847,128 @@ async function folderAssetRead(
     principal: principal ?? { id: 'anonymous', type: 'user', name: 'Anonymous' },
     role,
   })
+}
+
+async function handleDocAssetComments(
+  db: Db,
+  request: Request,
+  url: URL,
+  doc: DocRow,
+  auth: AuthContext,
+  subPath: string,
+): Promise<Response> {
+  const parts = assetCommentParts(subPath)
+  if (!parts) return json({ error: 'not-found' }, 404)
+  const scope = assetScopeFor(doc)
+  const fallbackIds = scope.kind === 'folder' ? [doc.id] : []
+  const row = await resolveAssetRow(db, scope, parts.filename, fallbackIds)
+  if (!row) return json({ error: 'not-found' }, 404)
+  const folderId = scope.kind === 'folder' ? scope.id : row.folderId ?? doc.folderId ?? undefined
+  return handleAssetCommentProxy(
+    db,
+    request,
+    url,
+    row,
+    auth,
+    parts.commentPath,
+    assetCommentTarget(row, row.filename, folderId, doc.id),
+  )
+}
+
+async function handleFolderAssetComments(
+  db: Db,
+  request: Request,
+  url: URL,
+  folderId: string,
+  subPath: string,
+  principal: Principal | null,
+  shareToken: string | null,
+  preloadedFolder?: typeof folders.$inferSelect,
+): Promise<Response> {
+  const unauthorized = () =>
+    !principal && !shareToken ? json({ error: 'unauthenticated' }, 401) : json({ error: 'not-found' }, 404)
+  const parts = assetCommentParts(subPath)
+  if (!parts) return json({ error: 'not-found' }, 404)
+
+  const folder =
+    preloadedFolder ??
+    (await db.select().from(folders).where(eq(folders.id, folderId)).limit(1))[0]
+  if (!folder) return unauthorized()
+
+  const role = maxRole(
+    await resolveFolderRole(db, folder, principal),
+    await folderShareLinkRole(db, folder.id, principal, shareToken),
+  )
+  if (role === null) return unauthorized()
+  if (request.method !== 'GET' && !principal) return json({ error: 'unauthenticated' }, 401)
+
+  const auth: AuthContext = {
+    principal: principal ?? { id: 'anonymous', type: 'user', name: 'Anonymous' },
+    role,
+  }
+  const fallbackIds = await fallbackDocIdsFor(db, folder.id)
+  const row = await resolveAssetRow(db, { kind: 'folder', id: folder.id }, parts.filename, fallbackIds)
+  if (!row) return json({ error: 'not-found' }, 404)
+  return handleAssetCommentProxy(
+    db,
+    request,
+    url,
+    row,
+    auth,
+    parts.commentPath,
+    assetCommentTarget(row, row.filename, folder.id),
+  )
+}
+
+async function handleAssetCommentProxy(
+  db: Db,
+  request: Request,
+  url: URL,
+  row: AssetRow,
+  auth: AuthContext,
+  commentPath: string,
+  target: CommentTarget,
+): Promise<Response> {
+  if (assetKindForContentType(row.contentType) !== 'html') return json({ error: 'unsupported-asset-type' }, 415)
+  const isWrite = request.method !== 'GET' && request.method !== 'HEAD'
+  if (isWrite && !roleAtLeast(auth.role, 'commenter')) return json({ error: 'forbidden' }, 403)
+
+  const isReply = request.method === 'POST' && /^\/comments\/[^/]+\/replies$/.test(commentPath)
+  const isCommentWrite = (request.method === 'POST' && commentPath === '/comments') || isReply
+  if (isCommentWrite) {
+    const bodyText = await request.text()
+    const response = await forwardToAssetDoc(request, row.id, row.currentVersionId, commentPath, url.search, auth, bodyText)
+    if (response.ok) {
+      const mentioned = await notifyMentions(db, bodyText, response, target, auth.principal, url.origin)
+      if (isReply) await notifyCommentReply(db, response, target, auth.principal, mentioned)
+    }
+    return response
+  }
+
+  return forwardToAssetDoc(request, row.id, row.currentVersionId, commentPath, url.search, auth)
+}
+
+function isAssetCommentPath(subPath: string): boolean {
+  return ASSET_COMMENT_PATH.test(subPath)
+}
+
+function assetCommentParts(subPath: string): { filename: string; commentPath: string } | null {
+  const match = subPath.match(ASSET_COMMENT_PATH)
+  if (!match) return null
+  return { filename: safeDecode(match[1]!), commentPath: `/comments${match[2] ?? ''}` }
+}
+
+function assetCommentTarget(row: AssetRow, filename: string, folderId?: string, docId?: string): CommentTarget {
+  return {
+    kind: 'asset',
+    id: row.id,
+    label: filename,
+    deepLink: folderId
+      ? `/f/${encodeURIComponent(folderId)}/file/${encodeURIComponent(filename)}`
+      : `/d/${encodeURIComponent(docId ?? '')}`,
+    folderId,
+    filename,
+  }
 }
 
 /**
@@ -1512,7 +1667,7 @@ async function notifyMentions(
   db: Db,
   requestBody: string,
   response: Response,
-  doc: DocRow,
+  target: CommentTarget,
   author: Principal,
   origin: string,
 ): Promise<string[]> {
@@ -1538,8 +1693,7 @@ async function notifyMentions(
 
     const userIds = existing.map((u) => u.id)
     await notify(db, userIds, 'mention', {
-      docId: doc.id,
-      docTitle: docStem(doc),
+      ...commentTargetPayload(target),
       commentId,
       by: author.id,
       byName: author.name,
@@ -1552,10 +1706,10 @@ async function notifyMentions(
       userIds,
       {
         byName: author.name,
-        docId: doc.id,
-        docTitle: docStem(doc),
+        docTitle: target.label,
         excerpt: payload.body.slice(0, 200),
         origin,
+        deepLink: target.deepLink,
       },
       emailEnv(),
     )
@@ -1588,17 +1742,17 @@ async function notifiableUserId(db: Db, principalId: string): Promise<string | n
 async function notifyCommentReply(
   db: Db,
   response: Response,
-  doc: DocRow,
+  commentTarget: CommentTarget,
   author: Principal,
   alreadyNotified: string[],
 ): Promise<void> {
   try {
     const rootAuthorId = response.headers.get(HEADER_COMMENT_AUTHOR)
     if (!rootAuthorId) return
-    const target = await notifiableUserId(db, rootAuthorId)
+    const targetUserId = await notifiableUserId(db, rootAuthorId)
     // Skip self: the reply author (their agent's owner counts as them too).
-    if (!target || target === author.id || target === effectiveUserId(author)) return
-    if (alreadyNotified.includes(target)) return
+    if (!targetUserId || targetUserId === author.id || targetUserId === effectiveUserId(author)) return
+    if (alreadyNotified.includes(targetUserId)) return
 
     let commentId: string | null = null
     let excerpt = ''
@@ -1609,9 +1763,8 @@ async function notifyCommentReply(
     } catch {
       // non-JSON response — keep defaults
     }
-    await notify(db, [target], 'comment-reply', {
-      docId: doc.id,
-      docTitle: docStem(doc),
+    await notify(db, [targetUserId], 'comment-reply', {
+      ...commentTargetPayload(commentTarget),
       commentId,
       by: author.id,
       byName: author.name,
@@ -1619,6 +1772,21 @@ async function notifyCommentReply(
     })
   } catch (err) {
     console.error('comment-reply notification failed:', err)
+  }
+}
+
+function docCommentTarget(doc: DocRow): CommentTarget {
+  return { kind: 'doc', id: doc.id, label: docStem(doc), deepLink: `/d/${encodeURIComponent(doc.id)}` }
+}
+
+function commentTargetPayload(target: CommentTarget): Record<string, unknown> {
+  if (target.kind === 'doc') return { docId: target.id, docTitle: target.label }
+  return {
+    assetId: target.id,
+    assetTitle: target.label,
+    folderId: target.folderId ?? null,
+    filename: target.filename ?? target.label,
+    deepLink: target.deepLink,
   }
 }
 
@@ -1680,6 +1848,32 @@ async function forwardToDoc(
   const namespace = asAppEnv(env).DocDO as unknown as DurableObjectNamespace<Server<Env>>
   const stub = await getServerByName(namespace, docId)
   const headers = trustedHeaders(auth)
+  const contentType = request.headers.get('content-type')
+  if (contentType) headers.set('content-type', contentType)
+  const hasBody = request.method !== 'GET' && request.method !== 'HEAD'
+  const internal = new Request(`https://do${subPath}${search}`, {
+    method: request.method,
+    headers,
+    body: hasBody ? (bodyText ?? request.body) : undefined,
+  })
+  return stub.fetch(internal)
+}
+
+/** Proxy an asset-comment request to the HtmlDocDO keyed by immutable asset id. */
+async function forwardToAssetDoc(
+  request: Request,
+  assetId: string,
+  currentVersionId: string | null,
+  subPath: string,
+  search: string,
+  auth: AuthContext,
+  bodyText?: string,
+): Promise<Response> {
+  const namespace = asAppEnv(env).HtmlDocDO as unknown as DurableObjectNamespace<Server<Env>>
+  const stub = await getServerByName(namespace, assetId)
+  const headers = trustedHeaders(auth)
+  headers.set(HEADER_ASSET, assetId)
+  if (currentVersionId) headers.set(HEADER_ASSET_VERSION, currentVersionId)
   const contentType = request.headers.get('content-type')
   if (contentType) headers.set('content-type', contentType)
   const hasBody = request.method !== 'GET' && request.method !== 'HEAD'
@@ -1778,6 +1972,14 @@ function safeParse(text: string): unknown {
     return JSON.parse(text)
   } catch {
     return null
+  }
+}
+
+function safeDecode(segment: string): string {
+  try {
+    return decodeURIComponent(segment)
+  } catch {
+    return segment
   }
 }
 

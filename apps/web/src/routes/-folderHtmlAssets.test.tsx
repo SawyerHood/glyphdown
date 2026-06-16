@@ -89,6 +89,9 @@ vi.mock('../lib/api.ts', () => {
     deleteFolderAsset: vi.fn(),
     deleteVault: vi.fn(),
     fetchMe: () => Promise.resolve(null),
+    fetchFolderAssetCommentingView: vi.fn((_folderId: string, filename: string) =>
+      Promise.resolve({ html: `<!doctype html><h1>${filename}</h1>`, nonce: 'nonce-test' }),
+    ),
     folderAssetUrl: (folderId: string, filename: string, share?: string) =>
       `/api/folders/${encodeURIComponent(folderId)}/assets/${encodeURIComponent(filename)}${share ? `?share=${encodeURIComponent(share)}` : ''}`,
     getDoc: vi.fn(),
@@ -96,6 +99,7 @@ vi.mock('../lib/api.ts', () => {
     listAssets: vi.fn(),
     listDocs: () => Promise.resolve(h.docs),
     listFolderAssets: () => Promise.resolve(h.assets),
+    listFolderAssetComments: () => Promise.resolve([]),
     listFolderInvites: vi.fn(),
     listFolderMembers: vi.fn(),
     listFolderShareLinks: vi.fn(),
@@ -171,8 +175,8 @@ afterEach(() => {
 })
 
 describe('HTML asset viewer', () => {
-  it('uses an opaque-origin scripts-only sandbox and propagates share tokens to raw URLs', () => {
-    const { container } = render(
+  it('uses secretless srcdoc delivery while raw links keep the share URL', async () => {
+    const { container } = renderWithQuery(
       createElement(HtmlAssetViewerChrome, {
         folderId: 'sub',
         filename: 'report.html',
@@ -182,10 +186,12 @@ describe('HTML asset viewer', () => {
       }),
     )
 
-    const iframe = screen.getByTitle('report.html') as HTMLIFrameElement
+    const iframe = (await screen.findByTitle('report.html')) as HTMLIFrameElement
     expect(iframe.getAttribute('sandbox')).toBe('allow-scripts')
     expect(iframe.getAttribute('sandbox')).not.toContain('allow-same-origin')
-    expect(iframe.getAttribute('src')).toBe('/api/folders/sub/assets/report.html?share=tok-v1')
+    expect(iframe.getAttribute('src')).toBeNull()
+    expect(iframe.getAttribute('srcdoc')).toContain('<h1>report.html</h1>')
+    expect(iframe.getAttribute('srcdoc')).not.toContain('tok-v1')
 
     const rawLinks = [...container.querySelectorAll('a')].filter((a) => a.getAttribute('href') === '/api/folders/sub/assets/report.html?share=tok-v1')
     expect(rawLinks.length).toBe(2)

@@ -30,10 +30,48 @@ export interface Principal {
  */
 export const HEADER_PRINCIPAL = 'x-glyphdown-principal' // JSON Principal
 export const HEADER_ROLE = 'x-glyphdown-role' // Role
+export const HEADER_ASSET = 'x-glyphdown-asset' // Asset id resolved by the Worker
+export const HEADER_ASSET_VERSION = 'x-glyphdown-asset-version' // Current asset version id, when known
 
 // ---------------------------------------------------------------------------
 // Comments
 // ---------------------------------------------------------------------------
+
+export interface NodeStep {
+  tag: string
+  nthOfType: number
+  id?: string
+  clsNorm?: string
+}
+
+export interface NodeAnchor {
+  schema: 1
+  path: NodeStep[]
+  fingerprint: {
+    tag: string
+    id?: string
+    /** As-authored class list; diagnostic/exact-match evidence only. */
+    classesRaw?: string[]
+    /** De-hashed and sorted class list; weak scoring evidence only. */
+    classesNorm?: string[]
+    role?: string
+    ariaLabel?: string
+    name?: string
+    /** Small allowlist: type, href(host+path), alt, data-* */
+    attrs?: Record<string, string>
+  }
+  quote?: { exact: string; prefix: string; suffix: string }
+  textRange?: { start: number; end: number; unit: 'utf16' }
+  /** Document-order index at creation; search bias only. */
+  domHint: number
+  /** Human display label, e.g. `button "Save"`. */
+  label: string
+  status: 'anchored' | 'orphaned'
+  /** Dynamic/client-only node; display-only and not server-persistable. */
+  clientResolveOnly?: true
+}
+
+export type CommentAnchorKind = 'text' | 'node' | null
 
 export interface CommentReply {
   id: string
@@ -46,8 +84,17 @@ export interface CommentReply {
 
 export interface Comment {
   id: string
-  /** null = doc-level comment */
+  /** Back-compat text-anchor field. null = doc-level comment. */
   anchor: Anchor | null
+  /**
+   * Additive discriminated anchor fields. Existing markdown clients can keep
+   * reading `anchor`; new asset-comment clients read node anchors here.
+   */
+  anchorKind?: CommentAnchorKind
+  textAnchor?: Anchor | null
+  nodeAnchor?: NodeAnchor
+  /** Asset comments record the asset version they were authored against. */
+  versionId?: string
   authorId: string
   authorName: string
   body: string
@@ -124,6 +171,21 @@ export interface CreateCommentRequest {
   range?: { start: number; end: number }
 }
 
+export interface CreateAssetCommentRequest {
+  body: string
+  /** Omitted = asset-level comment. */
+  nodeAnchor?: NodeAnchor
+}
+
+export interface CommentTarget {
+  kind: 'doc' | 'asset'
+  id: string
+  label: string
+  deepLink: string
+  folderId?: string
+  filename?: string
+}
+
 export interface AcceptResponse {
   ok: true
   outdatedParts: number
@@ -141,6 +203,10 @@ export type DocEvent =
   | { t: 'suggestion-status'; id: string; status: Suggestion['status']; outdatedParts?: number }
   | { t: 'version'; version: VersionMeta }
   | { t: 'doc-deleted' }
+
+export type AssetCommentEvent =
+  | { t: 'comment'; comment: Comment }
+  | { t: 'comment-removed'; id: string }
 
 // Client -> server over the socket (suggest-mode sessions stream their
 // suggestion records so other clients render them live).
@@ -408,6 +474,18 @@ export interface UploadAssetResponse {
   asset: AssetMeta
   /** Markdown-relative path to embed: `![alt](<path>)`. */
   path: string
+}
+
+export interface AssetVersionMeta {
+  id: string
+  assetId: string
+  contentHash: string
+  size: number
+  etag: string
+  createdBy: string
+  createdAt: number
+  message?: string
+  current: boolean
 }
 
 export const MAX_ASSET_BYTES = 10 * 1024 * 1024 // 10 MB

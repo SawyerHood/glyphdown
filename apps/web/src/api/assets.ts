@@ -1,5 +1,9 @@
-import { and, eq, inArray, isNull, or } from 'drizzle-orm'
+import { env } from 'cloudflare:workers'
+import { getServerByName, type Server } from 'partyserver'
+import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm'
 import {
+  type AssetVersionMeta,
+  HEADER_ASSET,
   MAX_ASSET_BYTES,
   assetKindForContentType,
   normalizeAssetFilename,
@@ -7,10 +11,12 @@ import {
   type AssetMeta,
   type UploadAssetResponse,
 } from '@glyphdown/protocol'
-import { assets, docs } from '../db/schema.ts'
+import { assetVersions, assets, contentObjects, docs } from '../db/schema.ts'
 import type { Db } from '../db/client.ts'
-import type { AuthContext } from './auth.ts'
+import { trustedHeaders, type AuthContext } from './auth.ts'
 import type { DocRow } from './roles.ts'
+import { asAppEnv } from '../env.ts'
+import { installHtmlCommentsRuntime } from '../runtime/html-comments.ts'
 
 /**
  * Doc/folder file assets: bytes in R2 (ASSETS binding), metadata in D1
@@ -67,7 +73,35 @@ export function assetR2Key(scope: AssetScope, filename: string): string {
 // Row helpers
 // ---------------------------------------------------------------------------
 
-type AssetRow = typeof assets.$inferSelect
+export type AssetRow = typeof assets.$inferSelect
+type AssetVersionRow = typeof assetVersions.$inferSelect
+
+function contentObjectKey(hash: string): string {
+  return `asset-blobs/sha256/${hash}`
+}
+
+function assetVersionMeta(row: AssetVersionRow, currentVersionId: string | null): AssetVersionMeta {
+  return {
+    id: row.id,
+    assetId: row.assetId,
+    contentHash: row.contentHash,
+    size: row.size,
+    etag: row.etag,
+    createdBy: row.createdBy,
+    createdAt: row.createdAt,
+    ...(row.message !== null ? { message: row.message } : {}),
+    current: row.id === currentVersionId,
+  }
+}
+
+async function inAssetTransaction<T>(db: Db, fn: (tx: Db) => Promise<T>): Promise<T> {
+  // D1 has no interactive transactions — drizzle's `db.transaction()` issues a
+  // BEGIN that D1 rejects ("Failed query: begin"). The append-version sequence
+  // reads between writes (so it can't be a single `db.batch()` either), so run
+  // it sequentially against the same db. This matches the non-atomic model the
+  // rest of the app already uses on D1; concurrent uploads stay last-writer-wins.
+  return fn(db)
+}
 
 function scopeFilter(scope: AssetScope) {
   return scope.kind === 'folder'
@@ -99,7 +133,7 @@ function byAge(a: AssetRow, b: AssetRow): number {
  * the live docs homed directly in the folder (a doc's namespace is its
  * DIRECT folder — subfolder docs have their own).
  */
-async function fallbackDocIdsFor(db: Db, folderId: string): Promise<string[]> {
+export async function fallbackDocIdsFor(db: Db, folderId: string): Promise<string[]> {
   const rows = await db
     .select({ id: docs.id })
     .from(docs)
@@ -120,7 +154,7 @@ async function fallbackRows(db: Db, docIds: string[], filename?: string): Promis
  * docs (oldest row wins when two legacy namespaces share a filename — same
  * order the merged listing uses).
  */
-async function resolveAssetRow(
+export async function resolveAssetRow(
   db: Db,
   scope: AssetScope,
   filename: string,
@@ -225,11 +259,23 @@ export async function handleDocAssets(
     return json({ error: 'method-not-allowed' }, 405)
   }
 
+  const versionRoute = assetVersionRoute(subPath)
+  if (versionRoute) {
+    return handleAssetVersions(db, bucket, request, scope, versionRoute.filename, fallbackIds, auth, versionRoute)
+  }
+
+  const commentingViewMatch = subPath.match(/^\/assets\/([^/]+)\/commenting-view$/)
+  if (commentingViewMatch) {
+    if (request.method !== 'GET') return json({ error: 'method-not-allowed' }, 405)
+    const filename = safeDecode(commentingViewMatch[1]!)
+    return streamAssetCommentingView(db, bucket, scope, filename, fallbackIds, assetPublicPath(url))
+  }
+
   const match = subPath.match(/^\/assets\/([^/]+)$/)
   if (!match) return json({ error: 'not-found' }, 404)
   const filename = safeDecode(match[1]!)
 
-  if (request.method === 'GET') return streamAsset(db, bucket, scope, filename, fallbackIds, request)
+  if (request.method === 'GET') return streamAsset(db, bucket, scope, filename, fallbackIds, request, url.searchParams.get('version'))
   if (request.method === 'DELETE') {
     if (!roleAtLeast(auth.role, 'editor')) return json({ error: 'forbidden' }, 403)
     return deleteAsset(db, bucket, scope, filename, fallbackIds)
@@ -263,10 +309,24 @@ export async function handleFolderAssets(
     }
     return json({ error: 'method-not-allowed' }, 405)
   }
+
+  const versionRoute = assetVersionRoute(subPath)
+  if (versionRoute) {
+    if (auth === null) return json({ error: 'forbidden' }, 403)
+    return handleAssetVersions(db, bucket, request, scope, versionRoute.filename, fallbackIds, auth, versionRoute)
+  }
+
+  const commentingViewMatch = subPath.match(/^\/assets\/([^/]+)\/commenting-view$/)
+  if (commentingViewMatch) {
+    if (request.method !== 'GET') return json({ error: 'method-not-allowed' }, 405)
+    const filename = safeDecode(commentingViewMatch[1]!)
+    return streamAssetCommentingView(db, bucket, scope, filename, fallbackIds, assetPublicPath(url))
+  }
+
   const match = subPath.match(/^\/assets\/([^/]+)$/)
   if (!match) return json({ error: 'not-found' }, 404)
   const filename = safeDecode(match[1]!)
-  if (request.method === 'GET') return streamAsset(db, bucket, scope, filename, fallbackIds, request)
+  if (request.method === 'GET') return streamAsset(db, bucket, scope, filename, fallbackIds, request, url.searchParams.get('version'))
   if (request.method === 'DELETE') {
     // Same gate as the doc-scoped delete (SPEC §4): editor+ only.
     if (auth === null || !roleAtLeast(auth.role, 'editor')) return json({ error: 'forbidden' }, 403)
@@ -307,22 +367,25 @@ async function uploadAsset(
   const existing = existingRows.find((r) => r.filename === normalized)
 
   if (existing && overwrite) {
-    const stored = await bucket.put(existing.r2Key, body, { httpMetadata: { contentType } })
-    const update = {
-      contentType,
-      size: body.byteLength,
-      etag: stored.etag,
-      createdBy: auth.principal.id,
-      createdAt: Date.now(),
+    let result: { row: AssetRow; version: AssetVersionRow }
+    try {
+      result = await appendVersionToExistingAsset(db, bucket, existing, body, contentType, auth)
+    } catch (err) {
+      if (err instanceof Error && (err.message === 'legacy-asset-bytes-missing' || err.message === 'asset-not-found')) {
+        return json({ error: 'not-found' }, 404)
+      }
+      throw err
     }
-    await db.update(assets).set(update).where(eq(assets.id, existing.id))
-    return json({ asset: assetMeta({ ...existing, ...update }), path: existing.filename } satisfies UploadAssetResponse)
+    const row = result.row
+    return json({ asset: assetMeta(row), path: existing.filename } satisfies UploadAssetResponse)
   }
 
   const filename = uniqueAssetFilename(normalized, new Set(existingRows.map((r) => r.filename)))
   const r2Key = assetR2Key(scope, filename)
-  const stored = await bucket.put(r2Key, body, { httpMetadata: { contentType } })
-  const row: AssetRow = {
+  const blob = await ensureContentBlob(db, bucket, body)
+  const now = Date.now()
+  const versionId = crypto.randomUUID()
+  const insertRow: AssetRow = {
     id: crypto.randomUUID(),
     folderId: scope.kind === 'folder' ? scope.id : null,
     docId: scope.kind === 'doc' ? scope.id : null,
@@ -330,12 +393,384 @@ async function uploadAsset(
     r2Key,
     contentType,
     size: body.byteLength,
-    etag: stored.etag,
+    etag: blob.etag,
+    currentVersionId: null,
     createdBy: auth.principal.id,
-    createdAt: Date.now(),
+    createdAt: now,
   }
-  await db.insert(assets).values(row)
+  await inAssetTransaction(db, async (tx) => {
+    await tx.insert(contentObjects).values({ hash: blob.hash, size: body.byteLength, refcount: 1 }).onConflictDoUpdate({
+      target: contentObjects.hash,
+      set: { refcount: sql`${contentObjects.refcount} + 1` },
+    })
+    await tx.insert(assets).values(insertRow)
+    await tx.insert(assetVersions).values({
+      id: versionId,
+      assetId: insertRow.id,
+      contentHash: blob.hash,
+      size: body.byteLength,
+      etag: blob.etag,
+      createdBy: auth.principal.id,
+      createdAt: now,
+      message: null,
+    })
+    await tx.update(assets).set({ currentVersionId: versionId }).where(eq(assets.id, insertRow.id))
+  })
+  const row: AssetRow = { ...insertRow, currentVersionId: versionId }
+  await notifyHtmlAssetContentChanged(row, body, auth)
   return json({ asset: assetMeta(row), path: filename } satisfies UploadAssetResponse)
+}
+
+interface PreparedBlob {
+  hash: string
+  etag: string
+}
+
+interface PreparedVersion {
+  id: string
+  contentHash: string
+  size: number
+  etag: string
+  createdBy: string
+  createdAt: number
+  message: string | null
+}
+
+async function ensureContentBlob(db: Db, bucket: R2Bucket, body: ArrayBuffer): Promise<PreparedBlob> {
+  const hash = await sha256ArrayBuffer(body)
+  const key = contentObjectKey(hash)
+  const known = (await db.select({ hash: contentObjects.hash }).from(contentObjects).where(eq(contentObjects.hash, hash)).limit(1))[0]
+  if (!known) {
+    const stored = await bucket.put(key, body)
+    return { hash, etag: stored?.etag ?? hash }
+  }
+
+  const object = await bucket.get(key)
+  if (object) return { hash, etag: object.etag ?? stripHttpEtag(object.httpEtag) }
+
+  // D1 says the object exists but R2 is missing. Repair from the bytes we
+  // already have; the refcount transaction remains the source of truth.
+  const stored = await bucket.put(key, body)
+  return { hash, etag: stored?.etag ?? hash }
+}
+
+async function appendVersionToExistingAsset(
+  db: Db,
+  bucket: R2Bucket,
+  existing: AssetRow,
+  body: ArrayBuffer,
+  contentType: string,
+  auth: AuthContext,
+): Promise<{ row: AssetRow; version: AssetVersionRow }> {
+  const nextBlob = await ensureContentBlob(db, bucket, body)
+  const backfill = existing.currentVersionId === null ? await prepareLegacyBackfill(db, bucket, existing) : null
+  const now = Date.now()
+  const nextVersion: PreparedVersion = {
+    id: crypto.randomUUID(),
+    contentHash: nextBlob.hash,
+    size: body.byteLength,
+    etag: nextBlob.etag,
+    createdBy: auth.principal.id,
+    createdAt: now,
+    message: null,
+  }
+
+  const { row, version } = await inAssetTransaction(db, async (tx) => {
+    const current = (await tx.select().from(assets).where(eq(assets.id, existing.id)).limit(1))[0]
+    if (!current) throw new Error('asset-not-found')
+
+    if (current.currentVersionId === null && backfill) {
+      await insertPreparedVersion(tx, current.id, backfill)
+    }
+
+    await insertPreparedVersion(tx, current.id, nextVersion)
+    const update = {
+      contentType,
+      size: nextVersion.size,
+      etag: nextVersion.etag,
+      currentVersionId: nextVersion.id,
+      createdBy: auth.principal.id,
+      createdAt: now,
+    }
+    await tx.update(assets).set(update).where(eq(assets.id, current.id))
+    const updated = { ...current, ...update }
+    return {
+      row: updated,
+      version: {
+        id: nextVersion.id,
+        assetId: current.id,
+        contentHash: nextVersion.contentHash,
+        size: nextVersion.size,
+        etag: nextVersion.etag,
+        createdBy: nextVersion.createdBy,
+        createdAt: nextVersion.createdAt,
+        message: nextVersion.message,
+      },
+    }
+  })
+
+  await notifyHtmlAssetContentChanged(row, body, auth)
+  return { row, version }
+}
+
+async function prepareLegacyBackfill(db: Db, bucket: R2Bucket, existing: AssetRow): Promise<PreparedVersion> {
+  const object = await bucket.get(existing.r2Key)
+  if (!object) throw new Error('legacy-asset-bytes-missing')
+  const body = await objectArrayBuffer(object)
+  const blob = await ensureContentBlob(db, bucket, body)
+  return {
+    id: crypto.randomUUID(),
+    contentHash: blob.hash,
+    size: existing.size,
+    // Preserve the legacy row's HTTP/sync etag for the imported v1 audit row.
+    etag: existing.etag,
+    createdBy: existing.createdBy,
+    createdAt: existing.createdAt,
+    message: null,
+  }
+}
+
+async function insertPreparedVersion(tx: Db, assetId: string, version: PreparedVersion): Promise<void> {
+  await tx
+    .insert(contentObjects)
+    .values({ hash: version.contentHash, size: version.size, refcount: 1 })
+    .onConflictDoUpdate({
+      target: contentObjects.hash,
+      set: { refcount: sql`${contentObjects.refcount} + 1` },
+    })
+  await tx.insert(assetVersions).values({
+    id: version.id,
+    assetId,
+    contentHash: version.contentHash,
+    size: version.size,
+    etag: version.etag,
+    createdBy: version.createdBy,
+    createdAt: version.createdAt,
+    message: version.message,
+  })
+}
+
+async function notifyHtmlAssetContentChanged(row: AssetRow, body: ArrayBuffer, auth: AuthContext): Promise<void> {
+  if (assetKindForContentType(row.contentType) !== 'html') return
+  const namespace = asAppEnv(env).HtmlDocDO as unknown as DurableObjectNamespace<Server<Env>> | undefined
+  if (!namespace) return
+  try {
+    const headers = trustedHeaders(auth)
+    headers.set(HEADER_ASSET, row.id)
+    headers.set('content-type', 'application/json')
+    const stub = await getServerByName(namespace, row.id)
+    const response = await stub.fetch(
+      new Request('https://do/admin/content', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          etag: row.etag,
+          contentHash: await sha256ArrayBuffer(body),
+          html: new TextDecoder().decode(body),
+        }),
+      }),
+    )
+    if (!response.ok) console.error(`HtmlDocDO content refresh failed for ${row.id}: ${response.status}`)
+  } catch (err) {
+    console.error(`HtmlDocDO content refresh failed for ${row.id}:`, err)
+  }
+}
+
+async function sha256ArrayBuffer(bytes: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+interface AssetVersionRoute {
+  filename: string
+  versionId?: string
+  action?: 'raw' | 'restore' | 'name'
+}
+
+function assetVersionRoute(subPath: string): AssetVersionRoute | null {
+  const match = subPath.match(/^\/assets\/([^/]+)\/versions(?:\/([^/]+)(?:\/(raw|restore|name))?)?$/)
+  if (!match) return null
+  return {
+    filename: safeDecode(match[1]!),
+    ...(match[2] ? { versionId: safeDecode(match[2]) } : {}),
+    ...(match[3] ? { action: match[3] as AssetVersionRoute['action'] } : {}),
+  }
+}
+
+async function handleAssetVersions(
+  db: Db,
+  bucket: R2Bucket,
+  request: Request,
+  scope: AssetScope,
+  filename: string,
+  fallbackDocIds: string[],
+  auth: AuthContext,
+  route: AssetVersionRoute,
+): Promise<Response> {
+  const row = await resolveAssetRow(db, scope, filename, fallbackDocIds)
+  if (!row) return json({ error: 'not-found' }, 404)
+
+  if (!route.versionId && !route.action) {
+    if (request.method !== 'GET') return json({ error: 'method-not-allowed' }, 405)
+    return listAssetVersions(db, row)
+  }
+
+  if (!route.versionId) return json({ error: 'not-found' }, 404)
+  if (route.action === 'raw') {
+    if (request.method !== 'GET') return json({ error: 'method-not-allowed' }, 405)
+    return streamAssetVersionById(db, bucket, row, route.versionId, request, true)
+  }
+
+  if (route.action === 'restore') {
+    if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405)
+    if (!roleAtLeast(auth.role, 'editor')) return json({ error: 'forbidden' }, 403)
+    return restoreAssetVersion(db, bucket, row, route.versionId, auth)
+  }
+
+  if (route.action === 'name' || !route.action) {
+    if (request.method !== 'POST' && request.method !== 'PATCH') return json({ error: 'method-not-allowed' }, 405)
+    if (!roleAtLeast(auth.role, 'editor')) return json({ error: 'forbidden' }, 403)
+    return nameAssetVersion(db, request, row, route.versionId)
+  }
+
+  return json({ error: 'not-found' }, 404)
+}
+
+async function listAssetVersions(db: Db, row: AssetRow): Promise<Response> {
+  const versions = await db
+    .select()
+    .from(assetVersions)
+    .where(eq(assetVersions.assetId, row.id))
+    .orderBy(desc(assetVersions.createdAt))
+  return json({ versions: versions.map((version) => assetVersionMeta(version, row.currentVersionId)) })
+}
+
+async function streamAssetVersionById(
+  db: Db,
+  bucket: R2Bucket,
+  row: AssetRow,
+  versionId: string,
+  request: Request,
+  immutable: boolean,
+): Promise<Response> {
+  const version = await findAssetVersion(db, row.id, versionId)
+  if (!version) return json({ error: 'version-not-found' }, 404)
+  const object = await bucket.get(contentObjectKey(version.contentHash))
+  if (!object) return json({ error: 'version-bytes-not-found' }, 404)
+  return assetObjectResponse(row.contentType, version.size, version.etag, object, request, immutable)
+}
+
+async function restoreAssetVersion(
+  db: Db,
+  bucket: R2Bucket,
+  row: AssetRow,
+  versionId: string,
+  auth: AuthContext,
+): Promise<Response> {
+  const source = await findAssetVersion(db, row.id, versionId)
+  if (!source) return json({ error: 'version-not-found' }, 404)
+  const object = await bucket.get(contentObjectKey(source.contentHash))
+  if (!object) return json({ error: 'version-bytes-not-found' }, 404)
+  const body = await objectArrayBuffer(object)
+  const now = Date.now()
+  const restored: PreparedVersion = {
+    id: crypto.randomUUID(),
+    contentHash: source.contentHash,
+    size: source.size,
+    etag: source.etag,
+    createdBy: auth.principal.id,
+    createdAt: now,
+    message: null,
+  }
+
+  const updatedRow = await inAssetTransaction(db, async (tx) => {
+    const current = (await tx.select().from(assets).where(eq(assets.id, row.id)).limit(1))[0]
+    if (!current) throw new Error('asset-not-found')
+    await insertPreparedVersion(tx, row.id, restored)
+    const update = {
+      size: restored.size,
+      etag: restored.etag,
+      currentVersionId: restored.id,
+      createdBy: auth.principal.id,
+      createdAt: now,
+    }
+    await tx.update(assets).set(update).where(eq(assets.id, row.id))
+    return { ...current, ...update }
+  })
+
+  await notifyHtmlAssetContentChanged(updatedRow, body, auth)
+  const version: AssetVersionRow = { assetId: row.id, ...restored }
+  return json({ asset: assetMeta(updatedRow), version: assetVersionMeta(version, updatedRow.currentVersionId) })
+}
+
+async function nameAssetVersion(db: Db, request: Request, row: AssetRow, versionId: string): Promise<Response> {
+  const version = await findAssetVersion(db, row.id, versionId)
+  if (!version) return json({ error: 'version-not-found' }, 404)
+  const payload = await readJson<{ name?: unknown; message?: unknown }>(request)
+  const raw = payload?.name ?? payload?.message
+  if (raw !== null && raw !== undefined && typeof raw !== 'string') return json({ error: 'bad-name' }, 400)
+  const message = typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : null
+  await db.update(assetVersions).set({ message }).where(and(eq(assetVersions.id, version.id), eq(assetVersions.assetId, row.id)))
+  return json(assetVersionMeta({ ...version, message }, row.currentVersionId))
+}
+
+async function findAssetVersion(db: Db, assetId: string, versionId: string): Promise<AssetVersionRow | undefined> {
+  return (
+    await db
+      .select()
+      .from(assetVersions)
+      .where(and(eq(assetVersions.id, versionId), eq(assetVersions.assetId, assetId)))
+      .limit(1)
+  )[0]
+}
+
+async function versionObject(
+  db: Db,
+  bucket: R2Bucket,
+  row: AssetRow,
+  versionId: string,
+): Promise<R2ObjectBody | null> {
+  const version = await findAssetVersion(db, row.id, versionId)
+  if (!version) return null
+  return bucket.get(contentObjectKey(version.contentHash))
+}
+
+function assetObjectResponse(
+  contentType: string,
+  size: number,
+  etag: string,
+  object: R2ObjectBody,
+  request: Request,
+  immutable: boolean,
+): Response {
+  const validator = httpEtag(etag)
+  const headers = new Headers({
+    'content-type': contentType,
+    // A specific `?version=<id>` is content-addressed and never changes, so cache
+    // it hard. The current view at the stable filename URL must revalidate so a
+    // re-push is visible without a hard refresh (PR #9); the ETag keeps that cheap
+    // via 304.
+    etag: validator,
+    'cache-control': immutable ? 'private, max-age=31536000, immutable' : 'private, no-cache',
+  })
+  if (assetKindForContentType(contentType) === 'html') {
+    headers.set('content-security-policy', 'sandbox allow-scripts')
+    headers.set('x-content-type-options', 'nosniff')
+  }
+  if (!immutable && etagMatches(request.headers.get('if-none-match'), validator)) {
+    return new Response(null, { status: 304, headers })
+  }
+  headers.set('content-length', String(size))
+  return new Response(object.body as unknown as BodyInit, { headers })
+}
+
+function httpEtag(etag: string): string {
+  if (etag.startsWith('"') || etag.startsWith('W/"')) return etag
+  return `"${etag}"`
+}
+
+function stripHttpEtag(etag: string): string {
+  return etag.replace(/^W\//, '').replace(/^"|"$/g, '')
 }
 
 async function streamAsset(
@@ -345,9 +780,14 @@ async function streamAsset(
   filename: string,
   fallbackDocIds: string[],
   request: Request,
+  versionId?: string | null,
 ): Promise<Response> {
   const row = await resolveAssetRow(db, scope, filename, fallbackDocIds)
   if (!row) return json({ error: 'not-found' }, 404)
+
+  if (versionId) return streamAssetVersionById(db, bucket, row, versionId, request, true)
+  if (row.currentVersionId) return streamAssetVersionById(db, bucket, row, row.currentVersionId, request, false)
+
   const object = await bucket.get(row.r2Key)
   if (!object) return json({ error: 'not-found' }, 404) // honest 404: row without bytes
   // Assets are served from a STABLE per-filename URL, so a re-push (overwrite)
@@ -369,6 +809,95 @@ async function streamAsset(
   }
   headers.set('content-length', String(object.size))
   return new Response(object.body as unknown as BodyInit, { headers })
+}
+
+async function streamAssetCommentingView(
+  db: Db,
+  bucket: R2Bucket,
+  scope: AssetScope,
+  filename: string,
+  fallbackDocIds: string[],
+  publicAssetPath: string,
+): Promise<Response> {
+  const row = await resolveAssetRow(db, scope, filename, fallbackDocIds)
+  if (!row) return json({ error: 'not-found' }, 404)
+  if (assetKindForContentType(row.contentType) !== 'html') return json({ error: 'unsupported-asset-type' }, 415)
+  const object = row.currentVersionId
+    ? await versionObject(db, bucket, row, row.currentVersionId)
+    : await bucket.get(row.r2Key)
+  if (!object) return json({ error: 'not-found' }, 404)
+  const source = new TextDecoder().decode(await objectArrayBuffer(object))
+  const nonce = randomNonce()
+  const body = injectHtmlCommentsRuntime(source, nonce, publicAssetPath)
+  const bytes = new TextEncoder().encode(body)
+  const headers = new Headers({
+    'content-type': 'text/html; charset=utf-8',
+    'content-length': String(bytes.byteLength),
+    etag: `W/"commenting-${row.etag}-${nonce}"`,
+    'cache-control': 'private, no-store',
+    'content-security-policy': 'sandbox allow-scripts',
+    'x-content-type-options': 'nosniff',
+    'x-glyphdown-view-nonce': nonce,
+    vary: 'cookie, authorization, x-glyphdown-share',
+  })
+  return new Response(bytes, { headers })
+}
+
+function injectHtmlCommentsRuntime(html: string, nonce: string, publicAssetPath: string): string {
+  const base = /<base\b/i.test(html) ? '' : `<base href="${escapeAttr(publicAssetPath)}">`
+  const script = `<script data-glyphdown-runtime>${runtimeSource(nonce)}</script>`
+  const injection = `${base}${script}`
+  const headOpen = html.match(/<head\b[^>]*>/i)
+  if (headOpen?.index !== undefined) {
+    const at = headOpen.index + headOpen[0].length
+    return `${html.slice(0, at)}${injection}${html.slice(at)}`
+  }
+
+  const htmlOpen = html.match(/<html\b[^>]*>/i)
+  if (htmlOpen?.index !== undefined) {
+    const at = htmlOpen.index + htmlOpen[0].length
+    return `${html.slice(0, at)}<head>${injection}</head>${html.slice(at)}`
+  }
+
+  const doctype = html.match(/^\s*<!doctype[^>]*>\s*/i)
+  const prefix = doctype?.[0] ?? ''
+  return `${prefix}<head>${injection}</head>${html.slice(prefix.length)}`
+}
+
+function runtimeSource(nonce: string): string {
+  return `;(${installHtmlCommentsRuntime.toString()})(${JSON.stringify(nonce)});`.replace(/<\/script/giu, '<\\/script')
+}
+
+function assetPublicPath(url: URL): string {
+  return url.pathname.replace(/\/commenting-view$/, '')
+}
+
+function escapeAttr(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+}
+
+function randomNonce(): string {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+async function objectArrayBuffer(object: R2ObjectBody): Promise<ArrayBuffer> {
+  const body = object.body as unknown
+  if (body instanceof ArrayBuffer) return body
+  if (body instanceof Uint8Array) {
+    const copy = new Uint8Array(body.byteLength)
+    copy.set(body)
+    return copy.buffer
+  }
+  if (body && typeof (body as { arrayBuffer?: unknown }).arrayBuffer === 'function') {
+    return (await (body as { arrayBuffer: () => Promise<ArrayBuffer> }).arrayBuffer()) as ArrayBuffer
+  }
+  return new Response(body as BodyInit).arrayBuffer()
 }
 
 /**
@@ -393,9 +922,31 @@ async function deleteAsset(
 ): Promise<Response> {
   const row = await resolveAssetRow(db, scope, filename, fallbackDocIds)
   if (!row) return json({ error: 'not-found' }, 404)
+  const versions = await db.select().from(assetVersions).where(eq(assetVersions.assetId, row.id))
+  const gcHashes = await inAssetTransaction(db, async (tx) => {
+    const toDelete = await decrementContentRefs(tx, versions)
+    await tx.delete(assets).where(eq(assets.id, row.id))
+    for (const hash of toDelete) await tx.delete(contentObjects).where(eq(contentObjects.hash, hash))
+    return toDelete
+  })
   await bucket.delete(row.r2Key)
-  await db.delete(assets).where(eq(assets.id, row.id))
+  for (const hash of gcHashes) await bucket.delete(contentObjectKey(hash))
   return json({ ok: true })
+}
+
+async function decrementContentRefs(tx: Db, versions: AssetVersionRow[]): Promise<string[]> {
+  const byHash = new Map<string, number>()
+  for (const version of versions) byHash.set(version.contentHash, (byHash.get(version.contentHash) ?? 0) + 1)
+  const gcHashes: string[] = []
+  for (const [hash, count] of byHash) {
+    await tx
+      .update(contentObjects)
+      .set({ refcount: sql`${contentObjects.refcount} - ${count}` })
+      .where(eq(contentObjects.hash, hash))
+    const row = (await tx.select().from(contentObjects).where(eq(contentObjects.hash, hash)).limit(1))[0]
+    if (row && row.refcount <= 0) gcHashes.push(hash)
+  }
+  return gcHashes
 }
 
 function safeDecode(segment: string): string {
@@ -408,4 +959,12 @@ function safeDecode(segment: string): string {
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+}
+
+async function readJson<T>(request: Request): Promise<T | null> {
+  try {
+    return (await request.json()) as T
+  } catch {
+    return null
+  }
 }

@@ -33,6 +33,11 @@
 				"class_name": "DocDO"
 			},
 			{
+				// Per-HTML-asset comment sidecar, keyed internally by assets.id.
+				"name": "HtmlDocDO",
+				"class_name": "HtmlDocDO"
+			},
+			{
 				// Single global full-text/wiki-link index (name 'global').
 				// Internal-only: the Worker never routes public traffic to it
 				// (the /parties auth check requires a real doc id).
@@ -49,6 +54,10 @@
 		{
 			"tag": "v2",
 			"new_sqlite_classes": ["SearchDO"]
+		},
+		{
+			"tag": "v3",
+			"new_sqlite_classes": ["HtmlDocDO"]
 		}
 	],
 	"d1_databases": [
