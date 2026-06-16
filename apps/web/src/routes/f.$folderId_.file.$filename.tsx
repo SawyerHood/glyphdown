@@ -1,7 +1,7 @@
 import { Link, createFileRoute } from '@tanstack/react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, Download, ExternalLink, FileCode2, FolderX, MessageSquare, MessageSquarePlus, X } from 'lucide-react'
+import { Download, ExternalLink, FileCode2, FolderX, MessageSquare, MessageSquarePlus, X } from 'lucide-react'
 import { assetKindForContentType, roleAtLeast, type AssetMeta, type Comment, type NodeAnchor, type Principal, type Role } from '@glyphdown/protocol'
 import {
   ApiError,
@@ -24,8 +24,9 @@ import {
 } from '../runtime/html-comments.ts'
 import { track } from '../lib/analytics.ts'
 import { useIsMobile } from '../lib/useMediaQuery.ts'
-import { Button, Spinner } from '../components/ui.tsx'
+import { Badge, Button, Spinner } from '../components/ui.tsx'
 import MentionTextarea from '../components/MentionTextarea.tsx'
+import EditorHeader, { BrandSquare } from '../components/editor/EditorHeader.tsx'
 import CommentThreadList, {
   type CommentAnchorPreview,
   type CommentThreadDescriptor,
@@ -113,7 +114,6 @@ function FolderHtmlAssetViewer() {
 export function HtmlAssetViewerChrome({
   folderId,
   filename,
-  folderName,
   folderRole = 'viewer',
   share,
   asset,
@@ -215,7 +215,6 @@ export function HtmlAssetViewerChrome({
 
   const handlePickedAnchor = useCallback(
     (anchor: NodeAnchor, rect?: PickedRect) => {
-      setPicking(false)
       if (!canComment) return
       if (reattachTarget) {
         void (async () => {
@@ -319,19 +318,29 @@ export function HtmlAssetViewerChrome({
 
   useEffect(() => {
     if (!frameReady) return
-    postToFrame({ t: 'gd:set-mode', mode: picking ? 'pick' : 'browse' })
-  }, [frameReady, picking, postToFrame])
+    // Comment mode = the panel is open. Suspend element-picking while a composer
+    // is open (pendingAnchor) so a stray click can't drop the in-progress comment.
+    postToFrame({ t: 'gd:set-mode', mode: picking && !pendingAnchor ? 'pick' : 'browse' })
+  }, [frameReady, picking, pendingAnchor, postToFrame])
 
   useEffect(() => {
     if (!frameReady) return
     postToFrame({ t: 'gd:set-markers', markers: markerPayload })
   }, [frameReady, markerPayload, postToFrame])
 
-  // On desktop the comments panel is part of the layout (like the mockup); on
-  // mobile it stays a bottom sheet you open on demand.
-  useEffect(() => {
-    if (!isMobile) setSidebarOpen(true)
-  }, [isMobile])
+  // Single control: opening the comments panel enters comment mode, closing it
+  // returns to browsing (and drops any in-progress pick/compose).
+  const toggleComments = useCallback(() => {
+    setSidebarOpen((open) => {
+      const next = !open
+      setPicking(next)
+      if (!next) {
+        clearPending()
+        setReattachTarget(null)
+      }
+      return next
+    })
+  }, [clearPending])
 
   const pendingPreview = useCallback((anchor: NodeAnchor): CommentAnchorPreview => previewForNodeAnchor(anchor), [])
   const analyticsTargetId = asset?.id ?? folderId
@@ -413,6 +422,7 @@ export function HtmlAssetViewerChrome({
       service={service}
       report={report}
       emptyHint={canComment ? 'Pick an element in the HTML file to add an anchored comment.' : 'Sign in with comment access to join the discussion.'}
+      anchoredLabel="On elements"
       documentLabel="File"
       documentActionLabel="Comment on the HTML file"
       documentPlaceholder="Comment on the whole HTML file…"
@@ -424,106 +434,59 @@ export function HtmlAssetViewerChrome({
 
   return (
     <div className="flex min-h-screen flex-col bg-[var(--bg-base)]">
-      <header className="flex h-12 shrink-0 items-center gap-3 border-b border-[var(--line)] bg-[var(--paper)] px-3 sm:px-4">
-        {share !== undefined ? (
-          <Link
-            to="/f/$folderId"
-            params={{ folderId }}
-            search={{ share }}
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-sm font-medium text-[var(--ink-soft)] no-underline hover:bg-[var(--paper-soft)] hover:text-[var(--ink)]"
-          >
-            <ArrowLeft size={15} /> Folder
-          </Link>
-        ) : (
-          <Link
-            to="/"
-            search={{ folder: folderId }}
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-sm font-medium text-[var(--ink-soft)] no-underline hover:bg-[var(--paper-soft)] hover:text-[var(--ink)]"
-          >
-            <ArrowLeft size={15} /> Folder
-          </Link>
-        )}
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          <FileCode2 size={16} className="shrink-0 text-[var(--ink-faint)]" />
-          <div className="min-w-0 flex-1">
-            <p className="m-0 truncate text-sm font-semibold text-[var(--ink)]">{filename}</p>
-            <p className="m-0 truncate text-[11px] text-[var(--ink-faint)]">
-              {reattachTarget
-                ? `Re-attaching ${labelForComment(reattachTarget)}`
-                : pendingAnchor
-                  ? `Selected ${pendingAnchor.label}`
-                  : folderName}
-            </p>
-          </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          <button
-            type="button"
-            title="Comments"
-            className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition ${
-              sidebarOpen
-                ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--ink)]'
-                : 'border-[var(--line)] bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-soft)]'
-            }`}
-            onClick={() => setSidebarOpen((value) => !value)}
-          >
-            <MessageSquare size={13} />
-            {openComments > 0 ? <span className="text-[11px] font-semibold">{openComments}</span> : null}
-          </button>
-          {canComment ? (
-            <div
-              role="group"
-              aria-label="Mode"
-              className="inline-flex items-center rounded-lg border border-[var(--line)] bg-[var(--paper-soft)] p-0.5"
-            >
-              <button
-                type="button"
-                aria-pressed={!picking}
-                onClick={() => {
-                  setPicking(false)
-                  setReattachTarget(null)
-                  clearPending()
-                }}
-                className={`rounded-[7px] px-2.5 py-1 text-xs font-semibold transition ${
-                  picking ? 'text-[var(--ink-soft)] hover:text-[var(--ink)]' : 'bg-[var(--paper)] text-[var(--ink)] shadow-sm'
-                }`}
-              >
-                Browse
-              </button>
-              <button
-                type="button"
-                aria-pressed={picking}
-                disabled={!frameReady}
-                title={picking ? pickingLabel : 'Click elements in the file to comment on them'}
-                onClick={() => setPicking(true)}
-                className={`inline-flex items-center gap-1.5 rounded-[7px] px-2.5 py-1 text-xs font-semibold transition disabled:opacity-50 ${
-                  picking ? 'bg-[var(--accent)] text-white shadow-sm' : 'text-[var(--ink-soft)] hover:text-[var(--ink)]'
-                }`}
-              >
-                <MessageSquarePlus size={13} /> Comment
-              </button>
-            </div>
-          ) : null}
-          <a
-            href={rawUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-xs font-medium text-[var(--ink)] no-underline transition hover:bg-[var(--paper-soft)]"
-          >
-            <ExternalLink size={13} />
-            <span className="hidden sm:inline">Open raw</span>
-            <span className="sm:hidden">Raw</span>
-          </a>
-          <a
-            href={rawUrl}
-            download={filename}
-            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-xs font-medium text-[var(--ink)] no-underline transition hover:bg-[var(--paper-soft)]"
-          >
-            <Download size={13} />
-            <span className="hidden sm:inline">Download</span>
-          </a>
-        </div>
-      </header>
+      <EditorHeader
+        brand={
+          share !== undefined ? (
+            <Link to="/f/$folderId" params={{ folderId }} search={{ share }} className="no-underline" title="Back to folder">
+              <BrandSquare>
+                <FileCode2 size={13} />
+              </BrandSquare>
+            </Link>
+          ) : (
+            <Link to="/" search={{ folder: folderId }} className="no-underline" title="Back to folder">
+              <BrandSquare>
+                <FileCode2 size={13} />
+              </BrandSquare>
+            </Link>
+          )
+        }
+        title={<span className="min-w-0 truncate text-sm font-semibold text-[var(--ink)]">{filename}</span>}
+        badges={
+          reattachTarget ? (
+            <Badge tone="blue">Re-attaching…</Badge>
+          ) : pendingAnchor ? (
+            <Badge tone="blue">Selected</Badge>
+          ) : null
+        }
+      >
+        <a
+          href={rawUrl}
+          target="_blank"
+          rel="noreferrer"
+          title="Open raw"
+          className="rounded-md p-1.5 text-[var(--ink-soft)] no-underline transition hover:bg-[var(--paper-soft)] hover:text-[var(--ink)] max-sm:hidden"
+        >
+          <ExternalLink size={15} />
+        </a>
+        <a
+          href={rawUrl}
+          download={filename}
+          title="Download"
+          className="rounded-md p-1.5 text-[var(--ink-soft)] no-underline transition hover:bg-[var(--paper-soft)] hover:text-[var(--ink)] max-sm:hidden"
+        >
+          <Download size={15} />
+        </a>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={toggleComments}
+          title="Comments"
+          className={`max-lg:px-3 max-lg:py-2 ${sidebarOpen ? 'text-[var(--accent)]' : ''}`}
+        >
+          <MessageSquare size={15} />
+          {openComments > 0 ? <span className="text-[11px] font-semibold">{openComments}</span> : null}
+        </Button>
+      </EditorHeader>
       {error ? <div className="bg-red-600 px-4 py-1.5 text-center text-xs font-medium text-white">{error}</div> : null}
       <div className="flex min-h-0 flex-1">
         <div className="relative min-w-0 flex-1 overflow-hidden bg-[var(--bg-base)] p-3 sm:p-5">
@@ -689,10 +652,6 @@ function previewForNodeAnchor(
     ...(anchor.quote?.exact ? { quote: anchor.quote.exact } : {}),
     ...(orphaned ? { orphaned: true } : {}),
   }
-}
-
-function labelForComment(comment: Comment): string {
-  return comment.nodeAnchor?.label ?? comment.body.slice(0, 40)
 }
 
 function HtmlAssetErrorCard({

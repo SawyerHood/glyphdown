@@ -47,6 +47,8 @@ export interface CommentThreadListProps<TPending> {
   service: CommentThreadService<TPending>
   report: (err: unknown) => void
   emptyHint: string
+  /** Header over the anchored group (e.g. "On elements" for HTML). Omitted = no header. */
+  anchoredLabel?: string
   documentLabel: string
   documentActionLabel: string
   documentPlaceholder: string
@@ -69,6 +71,7 @@ export default function CommentThreadList<TPending>({
   service,
   report,
   emptyHint,
+  anchoredLabel,
   documentLabel,
   documentActionLabel,
   documentPlaceholder,
@@ -221,7 +224,7 @@ export default function CommentThreadList<TPending>({
 
       {grouped.anchored.length > 0 ? (
         <>
-          <h3 className="island-kicker m-0 mt-2">On elements</h3>
+          {anchoredLabel ? <h3 className="island-kicker m-0 mt-2">{anchoredLabel}</h3> : null}
           {grouped.anchored.map((model) => (
             <Thread
               key={model.comment.id}
