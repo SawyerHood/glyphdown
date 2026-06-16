@@ -24,7 +24,8 @@ import {
 } from '../runtime/html-comments.ts'
 import { track } from '../lib/analytics.ts'
 import { useIsMobile } from '../lib/useMediaQuery.ts'
-import { Spinner } from '../components/ui.tsx'
+import { Button, Spinner } from '../components/ui.tsx'
+import MentionTextarea from '../components/MentionTextarea.tsx'
 import CommentThreadList, {
   type CommentAnchorPreview,
   type CommentThreadDescriptor,
@@ -37,6 +38,7 @@ type HtmlCommentsParentCommand =
   | { t: 'gd:focus-marker'; id: string }
 
 type MarkerResolution = { status: 'anchored' | 'orphaned'; domHint?: number; label?: string }
+type PickedRect = { top: number; left: number; bottom: number; right: number; width: number; height: number }
 
 const folderAssetCommentsKey = (folderId: string, filename: string, share?: string) =>
   ['folder-asset-comments', folderId, filename, share ?? null] as const
@@ -132,6 +134,7 @@ export function HtmlAssetViewerChrome({
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [activeCommentId, setActiveCommentId] = useState<string | null>(null)
   const [pendingAnchor, setPendingAnchor] = useState<NodeAnchor | null>(null)
+  const [pendingRect, setPendingRect] = useState<PickedRect | null>(null)
   const [reattachTarget, setReattachTarget] = useState<Comment | null>(null)
   const [markerResolutions, setMarkerResolutions] = useState<Record<string, MarkerResolution>>({})
   const [error, setError] = useState<string | null>(null)
@@ -211,7 +214,7 @@ export function HtmlAssetViewerChrome({
   )
 
   const handlePickedAnchor = useCallback(
-    (anchor: NodeAnchor) => {
+    (anchor: NodeAnchor, rect?: PickedRect) => {
       setPicking(false)
       if (!canComment) return
       if (reattachTarget) {
@@ -235,18 +238,48 @@ export function HtmlAssetViewerChrome({
         return
       }
       setPendingAnchor(anchor)
-      setSidebarOpen(true)
+      // Desktop: anchor an inline composer to the picked element. Mobile: fall
+      // back to the bottom-sheet composer.
+      if (isMobile) {
+        setPendingRect(null)
+        setSidebarOpen(true)
+      } else {
+        setPendingRect(rect ?? null)
+      }
     },
-    [canComment, filename, folderId, reattachTarget, report, share, upsertComment],
+    [canComment, filename, folderId, isMobile, reattachTarget, report, share, upsertComment],
   )
 
   useEffect(() => {
     setFrameReady(false)
     setPendingAnchor(null)
+    setPendingRect(null)
     setReattachTarget(null)
     setMarkerResolutions({})
     setPicking(false)
   }, [viewQuery.data?.html])
+
+  const clearPending = useCallback(() => {
+    setPendingAnchor(null)
+    setPendingRect(null)
+  }, [])
+
+  const submitInlineComment = useCallback(
+    async (body: string) => {
+      if (!pendingAnchor) return
+      try {
+        const created = await createFolderAssetComment(folderId, filename, { body, nodeAnchor: pendingAnchor }, share)
+        track('comment_created', { docId: asset?.id ?? folderId, kind: 'anchored' })
+        upsertComment(created)
+        setActiveCommentId(created.id)
+        clearPending()
+        setSidebarOpen(true)
+      } catch (err) {
+        report(err)
+      }
+    },
+    [asset?.id, clearPending, filename, folderId, pendingAnchor, report, share, upsertComment],
+  )
 
   useEffect(() => {
     const iframe = iframeRef.current
@@ -259,7 +292,7 @@ export function HtmlAssetViewerChrome({
       if (event.data.t === 'gd:ready') {
         setFrameReady(true)
       } else if (event.data.t === 'gd:select') {
-        handlePickedAnchor(event.data.anchor)
+        handlePickedAnchor(event.data.anchor, event.data.rect)
       } else if (event.data.t === 'gd:markers-resolved') {
         const next: Record<string, MarkerResolution> = {}
         for (const marker of event.data.markers) {
@@ -373,9 +406,9 @@ export function HtmlAssetViewerChrome({
       members={members}
       activeCommentId={activeCommentId}
       onSelect={selectThread}
-      pending={pendingAnchor}
+      pending={isMobile ? pendingAnchor : null}
       pendingPreview={pendingPreview}
-      onPendingDone={() => setPendingAnchor(null)}
+      onPendingDone={clearPending}
       describeComment={describeComment}
       service={service}
       report={report}
@@ -438,25 +471,38 @@ export function HtmlAssetViewerChrome({
             {openComments > 0 ? <span className="text-[11px] font-semibold">{openComments}</span> : null}
           </button>
           {canComment ? (
-            <button
-              type="button"
-              title={picking ? 'Cancel pick' : 'Pick an element to comment on'}
-              className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition ${
-                picking
-                  ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
-                  : 'border-[var(--line)] bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-soft)]'
-              }`}
-              onClick={() => {
-                setPicking((value) => {
-                  if (value) setReattachTarget(null)
-                  return !value
-                })
-              }}
-              disabled={!frameReady}
+            <div
+              role="group"
+              aria-label="Mode"
+              className="inline-flex items-center rounded-lg border border-[var(--line)] bg-[var(--paper-soft)] p-0.5"
             >
-              <MessageSquarePlus size={13} />
-              <span className="hidden sm:inline">{picking ? pickingLabel : 'Comment'}</span>
-            </button>
+              <button
+                type="button"
+                aria-pressed={!picking}
+                onClick={() => {
+                  setPicking(false)
+                  setReattachTarget(null)
+                  clearPending()
+                }}
+                className={`rounded-[7px] px-2.5 py-1 text-xs font-semibold transition ${
+                  picking ? 'text-[var(--ink-soft)] hover:text-[var(--ink)]' : 'bg-[var(--paper)] text-[var(--ink)] shadow-sm'
+                }`}
+              >
+                Browse
+              </button>
+              <button
+                type="button"
+                aria-pressed={picking}
+                disabled={!frameReady}
+                title={picking ? pickingLabel : 'Click elements in the file to comment on them'}
+                onClick={() => setPicking(true)}
+                className={`inline-flex items-center gap-1.5 rounded-[7px] px-2.5 py-1 text-xs font-semibold transition disabled:opacity-50 ${
+                  picking ? 'bg-[var(--accent)] text-white shadow-sm' : 'text-[var(--ink-soft)] hover:text-[var(--ink)]'
+                }`}
+              >
+                <MessageSquarePlus size={13} /> Comment
+              </button>
+            </div>
           ) : null}
           <a
             href={rawUrl}
@@ -480,25 +526,27 @@ export function HtmlAssetViewerChrome({
       </header>
       {error ? <div className="bg-red-600 px-4 py-1.5 text-center text-xs font-medium text-white">{error}</div> : null}
       <div className="flex min-h-0 flex-1">
-        <div className="relative min-w-0 flex-1 bg-white">
-          {viewQuery.isLoading ? (
-            <div className="grid h-full min-h-0 place-items-center bg-white">
-              <Spinner label="Loading HTML file..." />
-            </div>
-          ) : viewQuery.isError || !viewQuery.data ? (
-            <div className="grid h-full min-h-0 place-items-center bg-white px-4 text-center">
-              <p className="m-0 text-sm font-medium text-[var(--ink-soft)]">This HTML file could not be opened.</p>
-            </div>
-          ) : (
-            <iframe
-              ref={iframeRef}
-              title={filename}
-              sandbox="allow-scripts"
-              srcDoc={viewQuery.data.html}
-              className="h-full min-h-0 w-full border-0 bg-white"
-              data-asset-id={asset?.id}
-            />
-          )}
+        <div className="relative min-w-0 flex-1 overflow-hidden bg-[var(--bg-base)] p-3 sm:p-5">
+          <div className="mx-auto flex h-full w-full max-w-4xl overflow-hidden rounded-xl border border-[var(--line)] bg-white shadow-sm">
+            {viewQuery.isLoading ? (
+              <div className="grid h-full min-h-0 w-full place-items-center bg-white">
+                <Spinner label="Loading HTML file..." />
+              </div>
+            ) : viewQuery.isError || !viewQuery.data ? (
+              <div className="grid h-full min-h-0 w-full place-items-center bg-white px-4 text-center">
+                <p className="m-0 text-sm font-medium text-[var(--ink-soft)]">This HTML file could not be opened.</p>
+              </div>
+            ) : (
+              <iframe
+                ref={iframeRef}
+                title={filename}
+                sandbox="allow-scripts"
+                srcDoc={viewQuery.data.html}
+                className="h-full min-h-0 w-full border-0 bg-white"
+                data-asset-id={asset?.id}
+              />
+            )}
+          </div>
           {isMobile && picking && !sidebarOpen ? (
             <button
               type="button"
@@ -510,6 +558,16 @@ export function HtmlAssetViewerChrome({
             >
               <MessageSquarePlus size={16} /> {pickingLabel}
             </button>
+          ) : null}
+          {!isMobile && pendingAnchor && pendingRect ? (
+            <InlineComposer
+              rect={pendingRect}
+              iframe={iframeRef.current}
+              label={pendingAnchor.label}
+              members={members}
+              onSubmit={submitInlineComment}
+              onCancel={clearPending}
+            />
           ) : null}
         </div>
 
@@ -528,8 +586,13 @@ export function HtmlAssetViewerChrome({
                 <span className="h-1 w-9 rounded-full bg-[var(--line)]" />
               </div>
               <div className="flex shrink-0 items-center border-b border-[var(--line)] px-3 py-2">
-                <p className="m-0 flex-1 text-sm font-medium text-[var(--ink)]">
-                  Comments{openComments > 0 ? ` (${openComments})` : ''}
+                <p className="m-0 flex flex-1 items-center gap-2 text-sm font-semibold text-[var(--ink)]">
+                  Comments
+                  {openComments > 0 ? (
+                    <span className="rounded-full bg-[var(--paper-soft)] px-2 py-0.5 text-[11px] font-bold text-[var(--ink-soft)]">
+                      {openComments}
+                    </span>
+                  ) : null}
                 </p>
                 <button
                   type="button"
@@ -552,6 +615,65 @@ export function HtmlAssetViewerChrome({
             </aside>
           </>
         ) : null}
+      </div>
+    </div>
+  )
+}
+
+/** Compose-in-place popover anchored to a picked element, over the iframe (desktop). */
+function InlineComposer({
+  rect,
+  iframe,
+  label,
+  members,
+  onSubmit,
+  onCancel,
+}: {
+  rect: PickedRect
+  iframe: HTMLIFrameElement | null
+  label: string
+  members: MemberInfo[]
+  onSubmit: (body: string) => void
+  onCancel: () => void
+}) {
+  const [body, setBody] = useState('')
+  const POP_W = 320
+  const base = iframe?.getBoundingClientRect() ?? { top: 0, left: 0 }
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1280
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 800
+  const left = Math.max(12, Math.min(base.left + rect.left, vw - POP_W - 12))
+  let top = base.top + rect.bottom + 8
+  if (top > vh - 210) top = Math.max(12, base.top + rect.top - 210)
+  const submit = () => {
+    if (body.trim()) onSubmit(body.trim())
+  }
+  return (
+    <div
+      className="fixed z-[80] w-80 rounded-xl border border-[var(--line)] bg-[var(--paper)] p-3 shadow-xl"
+      style={{ top, left }}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') onCancel()
+      }}
+    >
+      <div className="mb-2 inline-flex max-w-full items-center gap-1.5 rounded-full bg-[var(--accent-soft)] px-2 py-0.5 text-[11px] font-semibold text-[var(--accent)]">
+        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--accent)]" />
+        <span className="truncate font-mono">{label}</span>
+      </div>
+      <MentionTextarea
+        value={body}
+        onChange={setBody}
+        members={members}
+        placeholder="Comment… use @ to mention"
+        autoFocus
+        onSubmit={submit}
+      />
+      <div className="mt-2 flex justify-end gap-2">
+        <Button size="sm" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button size="sm" variant="primary" disabled={body.trim() === ''} onClick={submit}>
+          Comment
+        </Button>
       </div>
     </div>
   )

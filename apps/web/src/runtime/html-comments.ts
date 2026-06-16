@@ -2,7 +2,14 @@ import type { NodeAnchor } from '@glyphdown/protocol'
 
 export type HtmlCommentsFrameMessage =
   | { t: 'gd:ready'; version: 1; nonce: string }
-  | { t: 'gd:select'; version: 1; nonce: string; anchor: NodeAnchor }
+  | {
+      t: 'gd:select'
+      version: 1
+      nonce: string
+      anchor: NodeAnchor
+      /** Picked element's viewport rect (for anchoring the parent's inline composer). */
+      rect?: { top: number; left: number; bottom: number; right: number; width: number; height: number }
+    }
   | {
       t: 'gd:markers-resolved'
       version: 1
@@ -30,7 +37,7 @@ export function isHtmlCommentsFrameMessage(value: unknown, nonce: string): value
     case 'gd:ready':
       return true
     case 'gd:select':
-      return isNodeAnchorShape(value['anchor'])
+      return isNodeAnchorShape(value['anchor']) && isOptionalRect(value['rect'])
     case 'gd:markers-resolved':
       return isBoundedArray(value['markers'], MAX_MARKERS, isMarkerResolution)
     case 'gd:marker-click':
@@ -108,6 +115,12 @@ function isNodeAnchorShape(value: unknown): value is NodeAnchor {
 
 function isNodeStepShape(value: unknown): value is { tag: string; nthOfType: number } {
   return isRecord(value) && isBoundedString(value['tag'], 64) && typeof value['nthOfType'] === 'number'
+}
+
+function isOptionalRect(value: unknown): boolean {
+  if (value === undefined) return true
+  if (!isRecord(value)) return false
+  return (['top', 'left', 'bottom', 'right', 'width', 'height'] as const).every((k) => Number.isFinite(value[k]))
 }
 
 export function installHtmlCommentsRuntime(nonce: string): void {
@@ -249,7 +262,14 @@ export function installHtmlCommentsRuntime(nonce: string): void {
     event.preventDefault()
     event.stopPropagation()
     const anchor = createAnchor(element)
-    if (anchor) post({ t: 'gd:select', anchor })
+    if (anchor) {
+      const r = element.getBoundingClientRect()
+      post({
+        t: 'gd:select',
+        anchor,
+        rect: { top: r.top, left: r.left, bottom: r.bottom, right: r.right, width: r.width, height: r.height },
+      })
+    }
   }
 
   function allIndexedElements(): Element[] {
