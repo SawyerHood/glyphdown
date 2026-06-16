@@ -106,6 +106,15 @@ export interface Api {
   listFolderShareLinks(folderId: string): Promise<ShareLink[]>
   createFolderShareLink(folderId: string, role: ShareLinkRole): Promise<ShareLink>
   revokeFolderShareLink(folderId: string, token: string): Promise<void>
+  /**
+   * Per-file (asset) share links — owner-only, FOLDER-SCOPED, and view/comment
+   * only (a static HTML file has no suggest/edit surface; the server 400s
+   * `bad-role` on the higher roles). Recipients open
+   * `/f/:folderId/file/:filename?share=<token>`.
+   */
+  listAssetShareLinks(folderId: string, filename: string): Promise<ShareLink[]>
+  createAssetShareLink(folderId: string, filename: string, role: ShareLinkRole): Promise<ShareLink>
+  revokeAssetShareLink(folderId: string, filename: string, token: string): Promise<void>
   /** Asset surface: doc routes resolve the namespace (folder or doc) server-side. */
   listDocAssets(docId: string): Promise<AssetMeta[]>
   listFolderAssets(folderId: string): Promise<AssetMeta[]>
@@ -372,6 +381,25 @@ export function createApi(opts: ApiOptions): Api {
       )
     },
 
+    async listAssetShareLinks(folderId, filename) {
+      const { shareLinks } = await requestJson<{ shareLinks: ShareLink[] }>(
+        'GET',
+        assetShareLinksPath(folderId, filename),
+      )
+      return shareLinks
+    },
+
+    createAssetShareLink(folderId, filename, role) {
+      return requestJson<ShareLink>('POST', assetShareLinksPath(folderId, filename), { role })
+    },
+
+    async revokeAssetShareLink(folderId, filename, token) {
+      await requestJson<unknown>(
+        'DELETE',
+        assetShareLinksPath(folderId, filename, `/${encodeURIComponent(token)}`),
+      )
+    },
+
     async listDocAssets(docId) {
       const { assets } = await requestJson<{ assets: AssetMeta[] }>(
         'GET',
@@ -504,6 +532,11 @@ export function createApi(opts: ApiOptions): Api {
 
   function assetVersionsPath(scope: 'docs' | 'folders', id: string, filename: string, sub = ''): string {
     return `/api/${scope}/${encodeURIComponent(id)}/assets/${encodeURIComponent(filename)}/versions${sub}`
+  }
+
+  // Per-file asset share links are folder-scoped only (no doc-scoped route).
+  function assetShareLinksPath(folderId: string, filename: string, sub = ''): string {
+    return `/api/folders/${encodeURIComponent(folderId)}/assets/${encodeURIComponent(filename)}/share-links${sub}`
   }
 
   async function uploadAsset(

@@ -77,6 +77,9 @@ function fakeApi(overrides: Partial<Api> = {}): Api {
     listFolderShareLinks: vi.fn(async () => [{ token: 'ftok1', role: 'editor' as const, createdAt: 7 }]),
     createFolderShareLink: vi.fn(async (_folderId: string, role: ShareLinkRole) => ({ token: 'ftok-new', role, createdAt: 8 })),
     revokeFolderShareLink: vi.fn(async () => undefined),
+    listAssetShareLinks: vi.fn(async () => [{ token: 'atok1', role: 'commenter' as const, createdAt: 9 }]),
+    createAssetShareLink: vi.fn(async (_folderId: string, _filename: string, role: ShareLinkRole) => ({ token: 'atok-new', role, createdAt: 10 })),
+    revokeAssetShareLink: vi.fn(async () => undefined),
     listDocAssets: vi.fn(async () => []),
     listFolderAssets: vi.fn(async () => []),
     downloadDocAsset: vi.fn(async () => ({ data: new Uint8Array(), etag: null, contentType: null })),
@@ -639,17 +642,99 @@ describe('glyphdown share', () => {
     expect(api.revokeFolderShareLink).toHaveBeenCalledWith('f1', 'ftok1')
   })
 
-  it('errors when both a doc and --folder are passed, or neither', async () => {
+  it('errors when neither a doc nor --folder is passed', async () => {
     const api = fakeApi({ listFolders: vi.fn(async () => [FOLDER]) })
     const h = harness(tmp(), api)
-    await expect(h.run(['share', 'doc1', '--folder', 'f1'])).rejects.toSatisfy((error: unknown) => {
-      expect((error as CliError).message).toContain('not both')
-      return true
-    })
     await expect(h.run(['share', 'list'])).rejects.toSatisfy((error: unknown) => {
       expect((error as CliError).message).toContain('missing target')
       return true
     })
+  })
+})
+
+describe('glyphdown share (per-file HTML assets)', () => {
+  const FOLDER = {
+    id: 'f1',
+    name: 'Research',
+    kind: 'vault' as const,
+    parentId: null,
+    ownerUserId: 'u1',
+    role: 'owner' as const,
+    createdAt: 1,
+  }
+
+  it('creates a per-file link from an asset URL and prints the file-viewer URL first', async () => {
+    const api = fakeApi()
+    const h = harness(tmp(), api)
+    await h.run(['share', 'https://ink.example/f/f1/file/page.html', '--role', 'commenter'])
+    expect(api.createAssetShareLink).toHaveBeenCalledWith('f1', 'page.html', 'commenter')
+    expect(h.lines[0]).toBe('https://ink.example/f/f1/file/page.html?share=atok-new')
+  })
+
+  it('creates a per-file link from a filename + --folder ref (JSON shape)', async () => {
+    const api = fakeApi({ listFolders: vi.fn(async () => [FOLDER]) })
+    const h = harness(tmp(), api)
+    await h.run(['share', 'page.html', '--folder', 'Research', '--json'])
+    expect(api.createAssetShareLink).toHaveBeenCalledWith('f1', 'page.html', 'viewer')
+    expect(JSON.parse(h.lines.join('\n'))).toEqual({
+      target: 'asset',
+      folderId: 'f1',
+      filename: 'page.html',
+      token: 'atok-new',
+      role: 'viewer',
+      createdAt: 10,
+      url: 'https://ink.example/f/f1/file/page.html?share=atok-new',
+    })
+  })
+
+  it('rejects suggest/edit roles for a per-file link before hitting the API', async () => {
+    const api = fakeApi()
+    const h = harness(tmp(), api)
+    await expect(
+      h.run(['share', 'https://ink.example/f/f1/file/page.html', '--role', 'editor']),
+    ).rejects.toSatisfy((error: unknown) => {
+      expect((error as CliError).exitCode).toBe(1)
+      expect((error as CliError).message).toContain('view/comment only')
+      return true
+    })
+    expect(api.createAssetShareLink).not.toHaveBeenCalled()
+  })
+
+  it('rejects a doc-scoped asset target with a clear error', async () => {
+    const api = fakeApi()
+    const h = harness(tmp(), api)
+    await expect(h.run(['share', 'page.html', '--doc', 'doc1'])).rejects.toSatisfy((error: unknown) => {
+      expect((error as CliError).exitCode).toBe(1)
+      expect((error as CliError).message).toContain('folder/vault assets only')
+      return true
+    })
+    expect(api.createAssetShareLink).not.toHaveBeenCalled()
+  })
+
+  it('lists per-file links with their file-viewer URLs', async () => {
+    const api = fakeApi()
+    const h = harness(tmp(), api)
+    await h.run(['share', 'list', 'https://ink.example/f/f1/file/page.html', '--json'])
+    expect(api.listAssetShareLinks).toHaveBeenCalledWith('f1', 'page.html')
+    expect(JSON.parse(h.lines.join('\n'))).toEqual([
+      { token: 'atok1', role: 'commenter', createdAt: 9, url: 'https://ink.example/f/f1/file/page.html?share=atok1' },
+    ])
+  })
+
+  it('revokes a per-file link by filename + token under --folder', async () => {
+    const api = fakeApi({ listFolders: vi.fn(async () => [FOLDER]) })
+    const h = harness(tmp(), api)
+    await h.run(['share', 'revoke', '--folder', 'Research', 'page.html', 'atok1'])
+    expect(api.revokeAssetShareLink).toHaveBeenCalledWith('f1', 'page.html', 'atok1')
+    expect(h.lines.join('\n')).toContain('revoked share link atok1 on asset f1/page.html')
+  })
+
+  it('revokes a per-file link from a ?share= asset URL', async () => {
+    const api = fakeApi()
+    const h = harness(tmp(), api)
+    await h.run(['share', 'revoke', 'https://ink.example/f/f1/file/page.html?share=atok9', '--json'])
+    expect(api.revokeAssetShareLink).toHaveBeenCalledWith('f1', 'page.html', 'atok9')
+    expect(JSON.parse(h.lines.join('\n'))).toEqual({ ok: true, target: 'asset', id: 'f1/page.html', token: 'atok9' })
   })
 })
 

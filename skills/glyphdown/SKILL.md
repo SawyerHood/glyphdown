@@ -69,6 +69,14 @@ glyphdown share revoke <doc> <token>                  # revoke (a ?share= URL al
 glyphdown share [list|revoke] --folder <ref> …        # folder/vault variants
 ```
 
+Per-file HTML asset links (folder/vault assets only, view/comment only — `suggester`/`editor` rejected). Target by viewer URL or filename + `--folder`; recipient lands on `/f/<folderId>/file/<filename>?share=<token>`:
+
+```sh
+glyphdown share page.html --folder <ref> [--role viewer|commenter]   # create (default viewer)
+glyphdown share list page.html --folder <ref> [--json]               # active per-file links
+glyphdown share revoke --folder <ref> page.html <token>              # revoke — filename THEN token
+```
+
 The token IS the capability — treat share URLs as secrets.
 
 ## Rules

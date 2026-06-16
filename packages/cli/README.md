@@ -363,6 +363,26 @@ glyphdown share list --folder Research --json
 glyphdown share revoke --folder Research <token>   # the token is the only positional
 ```
 
+### Per-file (HTML asset) links
+
+A single HTML asset can be shared on its own, the same way the web file viewer
+mints a per-file link. These are **folder/vault assets only** and **view or
+comment only** (a static file has no suggest/edit surface — `suggester`/`editor`
+are rejected). The recipient lands on the file viewer:
+`https://<server>/f/<folderId>/file/<filename>?share=<token>`.
+
+Target an asset the same way `comments`/`history` do — by its viewer URL, or by
+filename with `--folder` (the bare `--folder <ref>` without a filename still
+means "share the whole folder"):
+
+```sh
+glyphdown share https://glyphdown.com/f/f1/file/page.html --role commenter
+glyphdown share page.html --folder Research                 # default role: viewer
+glyphdown share list page.html --folder Research --json     # token, role, file-viewer url
+glyphdown share revoke --folder Research page.html <token>  # filename THEN token
+glyphdown share revoke "https://glyphdown.com/f/f1/file/page.html?share=<token>"
+```
+
 The token IS the capability — treat share URLs as secrets. Revoking cuts
 anonymous access immediately.
 
@@ -379,8 +399,10 @@ glyphdown snapshot page.html --folder Research -m "baseline" # name current HTML
 
 Every read command (`list`, `vaults`, `cat`, `history`, `comments`, `suggestions`, `new`) takes
 `--json` for machine-readable output, the `share` subcommands all take `--json`
-(create: `{target, id, token, role, createdAt, url}`; list: `[{token, role,
-createdAt, url}]`; revoke: `{ok, target, id, token}`), and `glyphdown sync --json`
+(create: `{target, id, token, role, createdAt, url}`, or for a per-file asset
+`{target:"asset", folderId, filename, token, role, createdAt, url}`; list:
+`[{token, role, createdAt, url}]`; revoke: `{ok, target, id, token}` — an asset
+revoke reports `id` as `<folderId>/<filename>`), and `glyphdown sync --json`
 emits the per-doc result records. Other write commands print short
 human-readable confirmations; rely on the exit code.
 

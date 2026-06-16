@@ -1034,21 +1034,92 @@ export function createProgram(deps: ProgramDeps = {}): Command {
     throw new CliError(1, `bad role "${value}" — a share link grants one of: ${SHARE_LINK_ROLES.join(', ')}`)
   }
 
+  // Per-file (asset) share links: folder-scoped, view/comment only. The
+  // recipient opens the file-viewer landing page, not the folder/doc page.
+  const ASSET_SHARE_ROLES: readonly ShareLinkRole[] = ['viewer', 'commenter']
+
+  const parseAssetShareRole = (value: string): ShareLinkRole => {
+    if ((ASSET_SHARE_ROLES as readonly string[]).includes(value)) return value as ShareLinkRole
+    // A static HTML file has no suggest/edit surface — reject the higher roles
+    // up front (the backend 400s them too).
+    throw new CliError(
+      1,
+      `bad role "${value}" for a per-file link — assets are view/comment only (one of: ${ASSET_SHARE_ROLES.join(', ')})`,
+    )
+  }
+
+  const assetShareUrl = (folderId: string, filename: string, token: string): string =>
+    `${config().serverUrl.replace(/\/+$/, '')}/f/${folderId}/file/${encodeURIComponent(filename)}?share=${token}`
+
+  // Per-file links exist for folder/vault assets only — the recipient URL and
+  // the backend route are both folder-scoped. Reject a doc-scoped target
+  // clearly rather than hitting a 404.
+  const requireFolderAsset = (asset: AssetTarget): { folderId: string; filename: string } => {
+    if (asset.scope !== 'folder') {
+      throw new CliError(
+        1,
+        'per-file share links are for folder/vault assets only — re-target with --folder <folder> (or use the /f/<id>/file/<name> URL)',
+      )
+    }
+    return { folderId: asset.id, filename: asset.filename }
+  }
+
+  // Resolve a `share` positional to an asset target, or null when it is a
+  // doc/folder target. Mirrors the `comments` convention (a --folder/--doc
+  // flag, or an asset URL, switches the positional to an asset filename), with
+  // one twist unique to `share`: a bare `--folder <ref>` (no positional) still
+  // means "share the whole folder", so it returns null.
+  const resolveShareAssetTarget = async (
+    positional: string | undefined,
+    opts: { folder?: string; doc?: string },
+  ): Promise<AssetTarget | null> => {
+    if (opts.folder === undefined && opts.doc === undefined) {
+      return positional === undefined ? null : parseAssetUrlRef(positional)
+    }
+    if (opts.folder !== undefined && opts.doc === undefined && positional === undefined) {
+      // `--folder <ref>` alone — a folder share, not a per-file asset.
+      return null
+    }
+    if (positional === undefined) {
+      throw new CliError(1, `${opts.doc !== undefined ? '--doc' : '--folder'} needs an asset filename (or pass an asset URL)`)
+    }
+    return resolveAssetTarget(positional, opts)
+  }
+
   const share = program
     .command('share')
-    .description('anyone-with-link share links, owner-only (bare `share <doc>` creates one; subcommands list/revoke)')
+    .description('anyone-with-link share links for docs, folders, or HTML assets, owner-only (bare `share <doc>` creates one; subcommands list/revoke)')
 
   share
     .command('create', { isDefault: true })
     .description('create a share link and print its URL (the bare `glyphdown share <doc>` does the same)')
-    .argument('[doc]', 'doc id or URL (omit with --folder)')
-    .option('--folder <folderRef>', 'share a folder/vault instead (id or exact name) — the link covers its whole subtree')
-    .option('--role <role>', `role the link grants: ${SHARE_LINK_ROLES.join(' | ')}`, 'viewer')
+    .argument('[doc]', 'doc id/URL, asset URL, or asset filename with --folder/--doc (omit alone with --folder)')
+    .option('--folder <folderRef>', 'share a folder/vault (id or exact name; covers its whole subtree), or — with a filename — a single asset in it')
+    .option('--doc <doc>', 'treat the positional as an asset filename in this doc/legacy namespace')
+    .option('--role <role>', `role the link grants (assets: view/comment only): ${SHARE_LINK_ROLES.join(' | ')}`, 'viewer')
     .option('--json', 'machine-readable output')
-    .action(async (doc: string | undefined, opts: { folder?: string; role: string; json?: boolean }) => {
+    .action(async (doc: string | undefined, opts: { folder?: string; doc?: string; role: string; json?: boolean }) => {
+      const asset = await resolveShareAssetTarget(doc, opts)
+      const api = apiFor()
+      if (asset) {
+        const { folderId, filename } = requireFolderAsset(asset)
+        const role = parseAssetShareRole(opts.role)
+        const link = await api.createAssetShareLink(folderId, filename, role)
+        const url = assetShareUrl(folderId, filename, link.token)
+        if (opts.json) {
+          out(JSON.stringify({ target: 'asset', folderId, filename, token: link.token, role: link.role, createdAt: link.createdAt, url }, null, 2))
+          return
+        }
+        out(url)
+        out(
+          pc.dim(
+            `${link.role} per-file link on ${folderId}/${filename} — revoke with \`glyphdown share revoke --folder ${folderId} ${filename} ${link.token}\``,
+          ),
+        )
+        return
+      }
       const role = parseShareRole(opts.role)
       const target = await shareTarget(doc, opts.folder)
-      const api = apiFor()
       const link =
         target.type === 'doc'
           ? await api.createDocShareLink(target.id, role)
@@ -1065,13 +1136,30 @@ export function createProgram(deps: ProgramDeps = {}): Command {
 
   share
     .command('list')
-    .description('active share links for a doc or folder, with their URLs')
-    .argument('[doc]', 'doc id or URL (omit with --folder)')
-    .option('--folder <folderRef>', 'list a folder/vault instead (id or exact name)')
+    .description('active share links for a doc, folder, or HTML asset, with their URLs')
+    .argument('[doc]', 'doc id/URL, asset URL, or asset filename with --folder/--doc (omit alone with --folder)')
+    .option('--folder <folderRef>', 'list a folder/vault (id or exact name), or — with a filename — a single asset in it')
+    .option('--doc <doc>', 'treat the positional as an asset filename in this doc/legacy namespace')
     .option('--json', 'machine-readable output')
-    .action(async (doc: string | undefined, opts: { folder?: string; json?: boolean }) => {
-      const target = await shareTarget(doc, opts.folder)
+    .action(async (doc: string | undefined, opts: { folder?: string; doc?: string; json?: boolean }) => {
+      const asset = await resolveShareAssetTarget(doc, opts)
       const api = apiFor()
+      if (asset) {
+        const { folderId, filename } = requireFolderAsset(asset)
+        const links = await api.listAssetShareLinks(folderId, filename)
+        const rows = links.map((l) => ({ ...l, url: assetShareUrl(folderId, filename, l.token) }))
+        if (opts.json) {
+          out(JSON.stringify(rows, null, 2))
+          return
+        }
+        if (rows.length === 0) {
+          out('no share links')
+          return
+        }
+        for (const l of rows) out(`${pc.dim(l.token)}  ${l.role.padEnd(9)}  ${l.url}`)
+        return
+      }
+      const target = await shareTarget(doc, opts.folder)
       const links =
         target.type === 'doc' ? await api.listDocShareLinks(target.id) : await api.listFolderShareLinks(target.id)
       const rows = links.map((l) => ({ ...l, url: shareUrl(target, l.token) }))
@@ -1089,34 +1177,68 @@ export function createProgram(deps: ProgramDeps = {}): Command {
   share
     .command('revoke')
     .description('revoke a share link by token (a URL already carrying ?share=<token> needs no separate token)')
-    .argument('[doc]', 'doc id or URL (with --folder: pass just the token)')
+    .argument('[doc]', 'doc id/URL, asset URL, or — with --folder/--doc — the asset filename')
     .argument('[token]', 'share-link token (from `share list`, or embedded in the URL as ?share=...)')
-    .option('--folder <folderRef>', 'revoke on a folder/vault instead (id or exact name)')
+    .option('--folder <folderRef>', 'revoke on a folder/vault (id or exact name); add a filename + token to revoke a per-file asset link')
+    .option('--doc <doc>', 'revoke a per-file asset link in this doc/legacy namespace (pass the filename + token)')
     .option('--json', 'machine-readable output')
-    .action(async (doc: string | undefined, token: string | undefined, opts: { folder?: string; json?: boolean }) => {
-      let target: ShareTarget
-      let tok: string | undefined
-      if (opts.folder !== undefined) {
-        // With --folder the single positional IS the token.
-        if (token !== undefined) throw new CliError(1, 'with --folder pass just the token')
-        target = await shareTarget(undefined, opts.folder)
-        tok = doc
-      } else {
-        target = await shareTarget(doc, undefined)
-        tok = token ?? (doc !== undefined ? (parseShareToken(doc) ?? undefined) : undefined)
-      }
-      if (tok === undefined) {
-        throw new CliError(1, 'missing token — pass it after the target, or use a URL with ?share=<token>')
-      }
-      const api = apiFor()
-      if (target.type === 'doc') await api.revokeDocShareLink(target.id, tok)
-      else await api.revokeFolderShareLink(target.id, tok)
-      if (opts.json) {
-        out(JSON.stringify({ ok: true, target: target.type, id: target.id, token: tok }, null, 2))
-        return
-      }
-      out(`revoked share link ${tok} on ${target.type} ${target.id}`)
-    })
+    .action(
+      async (
+        doc: string | undefined,
+        token: string | undefined,
+        opts: { folder?: string; doc?: string; json?: boolean },
+      ) => {
+        const api = apiFor()
+
+        // --- Per-file (asset) revoke ---------------------------------------
+        // An asset URL targets a file directly. With --folder/--doc, a filename
+        // ahead of the token does. (A lone `--folder <ref> <token>` keeps its
+        // folder-share meaning — only a SECOND positional makes it an asset.)
+        const urlAsset = opts.folder === undefined && opts.doc === undefined && doc !== undefined
+          ? parseAssetUrlRef(doc)
+          : null
+        const flagAsset = (opts.folder !== undefined || opts.doc !== undefined) && token !== undefined
+        if (urlAsset || flagAsset) {
+          const asset = urlAsset ?? (await resolveAssetTarget(doc as string, opts))
+          const { folderId, filename } = requireFolderAsset(asset as AssetTarget)
+          const tok = token ?? (doc !== undefined ? (parseShareToken(doc) ?? undefined) : undefined)
+          if (tok === undefined) {
+            throw new CliError(1, 'missing token — pass it after the asset, or use a URL with ?share=<token>')
+          }
+          await api.revokeAssetShareLink(folderId, filename, tok)
+          const label = `${folderId}/${filename}`
+          if (opts.json) {
+            out(JSON.stringify({ ok: true, target: 'asset', id: label, token: tok }, null, 2))
+            return
+          }
+          out(`revoked share link ${tok} on asset ${label}`)
+          return
+        }
+
+        // --- Doc / folder revoke -------------------------------------------
+        let target: ShareTarget
+        let tok: string | undefined
+        if (opts.folder !== undefined) {
+          // With --folder the single positional IS the token.
+          if (token !== undefined) throw new CliError(1, 'with --folder pass just the token')
+          target = await shareTarget(undefined, opts.folder)
+          tok = doc
+        } else {
+          target = await shareTarget(doc, undefined)
+          tok = token ?? (doc !== undefined ? (parseShareToken(doc) ?? undefined) : undefined)
+        }
+        if (tok === undefined) {
+          throw new CliError(1, 'missing token — pass it after the target, or use a URL with ?share=<token>')
+        }
+        if (target.type === 'doc') await api.revokeDocShareLink(target.id, tok)
+        else await api.revokeFolderShareLink(target.id, tok)
+        if (opts.json) {
+          out(JSON.stringify({ ok: true, target: target.type, id: target.id, token: tok }, null, 2))
+          return
+        }
+        out(`revoked share link ${tok} on ${target.type} ${target.id}`)
+      },
+    )
 
   // -- snapshot ---------------------------------------------------------------
   program
