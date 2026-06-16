@@ -177,7 +177,7 @@ async function listAssetRowsMerged(db: Db, scope: AssetScope, fallbackDocIds: st
   return [...byName.values()]
 }
 
-function assetMeta(row: AssetRow): AssetMeta {
+export function assetMeta(row: AssetRow): AssetMeta {
   return {
     id: row.id,
     filename: row.filename,

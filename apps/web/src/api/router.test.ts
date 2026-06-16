@@ -1008,7 +1008,7 @@ describe('DELETE /api/vaults/:id', () => {
 
 function seedShareLink(
   token: string,
-  targetType: 'doc' | 'folder',
+  targetType: 'doc' | 'folder' | 'asset',
   targetId: string,
   role = 'viewer',
   revokedAt: number | null = null,
@@ -1120,6 +1120,185 @@ describe('GET /api/folders/:id/listing', () => {
     const listing = await jsonOf<Listing>(await api('/api/folders/v1/listing', { headers: alice }))
     expect(listing.folder.role).toBe('owner')
     expect((await api('/api/folders/v1/listing', { headers: eve }))!.status).toBe(404)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Per-file (asset) share links: TRUE per-asset sharing of HTML files
+// ---------------------------------------------------------------------------
+
+/** alice owns v1 → sub, with two HTML files in sub: a.html (a-A) and b.html (a-B). */
+function seedTwoFileTree(): void {
+  principalFor('alice')
+  seedVault('v1', 'alice')
+  seedFolder('sub', 'alice', 'v1', 'Research')
+  seedHtmlAsset('a-A', 'sub', null, 'a.html')
+  seedHtmlAsset('a-B', 'sub', null, 'b.html')
+  h.objects.set('folder/sub/a.html', { bytes: new TextEncoder().encode('<!doctype html><h1>A</h1>'), contentType: 'text/html' })
+  h.objects.set('folder/sub/b.html', { bytes: new TextEncoder().encode('<!doctype html><h1>B</h1>'), contentType: 'text/html' })
+}
+
+describe('asset share-link CRUD (POST/GET/DELETE /api/folders/:id/assets/:file/share-links)', () => {
+  it('lets the owner create, list, and revoke a per-file link (target_type=asset)', async () => {
+    const headers = principalFor('alice')
+    seedTwoFileTree()
+
+    const created = await api('/api/folders/sub/assets/a.html/share-links', {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ role: 'commenter' }),
+    })
+    expect(created!.status).toBe(200)
+    const link = await jsonOf<{ token: string; role: string }>(created)
+    expect(link.role).toBe('commenter')
+    // It is stored as an ASSET link pointed at the asset id, not the folder.
+    expect(raw.prepare(`SELECT target_type, target_id FROM share_links WHERE token = ?`).get(link.token)).toEqual({
+      target_type: 'asset',
+      target_id: 'a-A',
+    })
+
+    const list = await jsonOf<{ shareLinks: Array<{ token: string; role: string }> }>(
+      await api('/api/folders/sub/assets/a.html/share-links', { headers }),
+    )
+    expect(list.shareLinks).toEqual([expect.objectContaining({ token: link.token, role: 'commenter' })])
+
+    const del = await api(`/api/folders/sub/assets/a.html/share-links/${link.token}`, { method: 'DELETE', headers })
+    expect(del!.status).toBe(200)
+    expect(raw.prepare(`SELECT revoked_at FROM share_links WHERE token = ?`).get(link.token)).not.toEqual({ revoked_at: null })
+    // Listing only returns live links.
+    const after = await jsonOf<{ shareLinks: unknown[] }>(await api('/api/folders/sub/assets/a.html/share-links', { headers }))
+    expect(after.shareLinks).toEqual([])
+  })
+
+  it('is owner-only: strangers 404 (no leak), non-owner members 403', async () => {
+    seedTwoFileTree()
+    const bob = principalFor('bob')
+    const eve = principalFor('eve')
+    grantFolder('v1', 'eve', 'editor') // inherited editor — still not owner
+
+    const stranger = await api('/api/folders/sub/assets/a.html/share-links', {
+      method: 'POST',
+      headers: { ...bob, 'content-type': 'application/json' },
+      body: JSON.stringify({ role: 'viewer' }),
+    })
+    expect(stranger!.status).toBe(404)
+
+    const member = await api('/api/folders/sub/assets/a.html/share-links', {
+      method: 'POST',
+      headers: { ...eve, 'content-type': 'application/json' },
+      body: JSON.stringify({ role: 'viewer' }),
+    })
+    expect(member!.status).toBe(403)
+
+    // Anonymous management is rejected outright.
+    expect((await api('/api/folders/sub/assets/a.html/share-links'))!.status).toBe(401)
+  })
+
+  it('404s for a filename with no asset row', async () => {
+    const headers = principalFor('alice')
+    seedTwoFileTree()
+    const res = await api('/api/folders/sub/assets/ghost.html/share-links', {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ role: 'viewer' }),
+    })
+    expect(res!.status).toBe(404)
+  })
+})
+
+describe('asset share-link access (restricted listing + raw + comments)', () => {
+  it('restricted listing exposes ONLY the shared file — no other assets, docs, or subfolders', async () => {
+    seedTwoFileTree()
+    seedDoc('d-secret', 'alice', 'secret.md', 'sub') // must not leak
+    seedShareLink('tok-A', 'asset', 'a-A', 'viewer')
+
+    const listing = await jsonOf<Listing>(await api('/api/folders/sub/listing?share=tok-A'))
+    expect(listing.folder).toMatchObject({ id: 'sub', role: 'viewer' })
+    expect(listing.folder.assets.map((a) => a.filename)).toEqual(['a.html'])
+    expect(listing.folders).toEqual([])
+    expect(listing.docs).toEqual([])
+  })
+
+  it('a token for asset A grants nothing on asset B, and cannot list the folder\'s assets', async () => {
+    seedTwoFileTree()
+    seedShareLink('tok-A', 'asset', 'a-A', 'viewer')
+
+    // The shared file reads; the sibling file 404s under the same token.
+    expect((await api('/api/folders/sub/assets/a.html?share=tok-A'))!.status).toBe(200)
+    expect((await api('/api/folders/sub/assets/b.html?share=tok-A'))!.status).toBe(404)
+    // The bare asset-list path (no filename) never rides an asset token — it
+    // would leak sibling files — so it stays denied.
+    expect((await api('/api/folders/sub/assets?share=tok-A'))!.status).toBe(404)
+    // commenting-view of the shared file works (the iframe source).
+    const view = await api('/api/folders/sub/assets/a.html/commenting-view?share=tok-A')
+    expect(view!.status).toBe(200)
+    expect(view!.headers.get('content-security-policy')).toBe('sandbox allow-scripts')
+  })
+
+  it('an asset token cannot list a DIFFERENT folder (no subtree escape)', async () => {
+    seedTwoFileTree()
+    seedShareLink('tok-A', 'asset', 'a-A', 'viewer')
+    // a-A lives in sub, not v1 — its token must not produce a v1 listing.
+    expect((await api('/api/folders/v1/listing?share=tok-A'))!.status).toBe(404)
+  })
+
+  it('a revoked asset token grants nothing (listing, raw, and comments all deny)', async () => {
+    seedTwoFileTree()
+    seedShareLink('tok-dead', 'asset', 'a-A', 'viewer', 999)
+    expect((await api('/api/folders/sub/listing?share=tok-dead'))!.status).toBe(404)
+    expect((await api('/api/folders/sub/assets/a.html?share=tok-dead'))!.status).toBe(404)
+    expect((await api('/api/folders/sub/assets/a.html/comments?share=tok-dead'))!.status).toBe(404)
+  })
+
+  it('comment POST via an asset token requires sign-in; anonymous is viewer/read-only', async () => {
+    seedTwoFileTree()
+    const bob = principalFor('bob')
+    seedShareLink('tok-comment', 'asset', 'a-A', 'commenter')
+    seedShareLink('tok-view', 'asset', 'a-A', 'viewer')
+
+    // Anonymous read through a VIEW link works.
+    const anonRead = await api('/api/folders/sub/assets/a.html/comments?share=tok-view')
+    expect(anonRead!.status).toBe(200)
+    expect(h.doCalls.at(-1)).toMatchObject({ ns: 'HtmlDocDO', name: 'a-A', path: '/comments' })
+    expect(h.doCalls.at(-1)!.headers.role).toBe('viewer')
+
+    // Anonymous WRITE is rejected even with a comment link (attribution).
+    const anonWrite = await api('/api/folders/sub/assets/a.html/comments?share=tok-comment', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'anon' }),
+    })
+    expect(anonWrite!.status).toBe(401)
+
+    // Signed-in caller on a comment link may write — and only for THIS asset.
+    const signedIn = await api('/api/folders/sub/assets/a.html/comments?share=tok-comment', {
+      method: 'POST',
+      headers: { ...bob, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'authorized' }),
+    })
+    expect(signedIn!.status).toBe(200)
+    expect(h.doCalls.at(-1)).toMatchObject({ ns: 'HtmlDocDO', name: 'a-A', headers: { role: 'commenter' } })
+
+    // The same comment token does NOT reach asset B's comments.
+    const otherAsset = await api('/api/folders/sub/assets/b.html/comments?share=tok-comment', {
+      method: 'POST',
+      headers: { ...bob, 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'nope' }),
+    })
+    expect(otherAsset!.status).toBe(404)
+  })
+
+  it('gives a signed-in visitor the link role in the restricted listing; anon comment links grant nothing', async () => {
+    seedTwoFileTree()
+    const bob = principalFor('bob')
+    seedShareLink('tok-comment', 'asset', 'a-A', 'commenter')
+
+    const viaLink = await jsonOf<Listing>(await api('/api/folders/sub/listing?share=tok-comment', { headers: bob }))
+    expect(viaLink.folder.role).toBe('commenter')
+    expect(viaLink.folder.assets.map((a) => a.filename)).toEqual(['a.html'])
+
+    // Anonymous + comment link → nothing (the listing 404s, like docs/folders).
+    expect((await api('/api/folders/sub/listing?share=tok-comment'))!.status).toBe(404)
   })
 })
 

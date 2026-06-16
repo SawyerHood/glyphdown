@@ -44,7 +44,7 @@ export interface FolderMembershipRow extends MembershipRow {
 }
 
 export interface ShareLinkRow {
-  targetType: 'doc' | 'folder'
+  targetType: 'doc' | 'folder' | 'asset'
   targetId: string
   role: Role
   revokedAt: number | null
@@ -234,6 +234,28 @@ export async function folderShareLinkRole(
   if (!link || link.revokedAt !== null || link.targetType !== 'folder') return null
   const chain = await fetchAncestorChain(db, folderId)
   if (!chain.includes(link.targetId)) return null
+  if (principal) return link.role
+  return link.role === 'viewer' ? 'viewer' : null
+}
+
+/**
+ * The role a share token confers on a single ASSET (per-file HTML sharing): the
+ * token must be an unrevoked link with targetType==='asset' and targetId equal
+ * to this asset's id — an asset link is point-scoped (it never inherits up to
+ * the folder, and a token for asset A grants nothing on asset B). Anonymous
+ * callers are capped exactly like doc/folder links: only a view-role link
+ * grants anything, and it grants `viewer` (comment-and-above needs sign-in for
+ * attribution, SPEC §4).
+ */
+export async function assetShareLinkRole(
+  db: Db,
+  assetId: string,
+  principal: Principal | null,
+  shareToken: string | null,
+): Promise<Role | null> {
+  if (!shareToken) return null
+  const link = (await db.select().from(shareLinks).where(eq(shareLinks.token, shareToken)).limit(1))[0]
+  if (!link || link.revokedAt !== null || link.targetType !== 'asset' || link.targetId !== assetId) return null
   if (principal) return link.role
   return link.role === 'viewer' ? 'viewer' : null
 }

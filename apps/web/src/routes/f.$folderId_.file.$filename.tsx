@@ -1,7 +1,7 @@
 import { Link, createFileRoute } from '@tanstack/react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Download, ExternalLink, FileCode2, FolderX, MessageSquare, MessageSquarePlus, X } from 'lucide-react'
+import { Download, ExternalLink, FileCode2, FolderX, MessageSquare, MessageSquarePlus, Share2, X } from 'lucide-react'
 import { assetKindForContentType, roleAtLeast, type AssetMeta, type Comment, type NodeAnchor, type Principal, type Role } from '@glyphdown/protocol'
 import {
   ApiError,
@@ -25,6 +25,7 @@ import {
 import { track } from '../lib/analytics.ts'
 import { useIsMobile } from '../lib/useMediaQuery.ts'
 import { Badge, Button, Spinner } from '../components/ui.tsx'
+import AssetShareDialog from '../components/AssetShareDialog.tsx'
 import MentionTextarea from '../components/MentionTextarea.tsx'
 import EditorHeader, { BrandSquare } from '../components/editor/EditorHeader.tsx'
 import CommentThreadList, {
@@ -138,10 +139,13 @@ export function HtmlAssetViewerChrome({
   const [reattachTarget, setReattachTarget] = useState<Comment | null>(null)
   const [markerResolutions, setMarkerResolutions] = useState<Record<string, MarkerResolution>>({})
   const [error, setError] = useState<string | null>(null)
+  const [shareOpen, setShareOpen] = useState(false)
 
   const meQuery = useQuery({ queryKey: ['me'], queryFn: fetchMe, staleTime: 60_000, retry: false })
   const me: Principal | null = meQuery.data ?? null
   const canComment = me !== null && roleAtLeast(folderRole, 'commenter')
+  // Sharing this file is owner-only — the same gate the doc/vault share dialogs use.
+  const canShare = me !== null && folderRole === 'owner'
 
   const viewQuery = useQuery({
     queryKey: ['folder-asset-commenting-view', folderId, filename, share ?? null],
@@ -486,7 +490,15 @@ export function HtmlAssetViewerChrome({
           <MessageSquare size={15} />
           {openComments > 0 ? <span className="text-[11px] font-semibold">{openComments}</span> : null}
         </Button>
+        {canShare ? (
+          <Button size="sm" variant="primary" onClick={() => setShareOpen(true)} title="Share this file">
+            <Share2 size={15} /> Share
+          </Button>
+        ) : null}
       </EditorHeader>
+      {canShare ? (
+        <AssetShareDialog folderId={folderId} filename={filename} open={shareOpen} onClose={() => setShareOpen(false)} />
+      ) : null}
       {error ? <div className="bg-red-600 px-4 py-1.5 text-center text-xs font-medium text-white">{error}</div> : null}
       <div className="flex min-h-0 flex-1">
         <div className="relative min-w-0 flex-1 overflow-hidden bg-[var(--bg-base)] p-3 sm:p-5">
