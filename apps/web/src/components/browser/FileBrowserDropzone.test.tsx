@@ -215,6 +215,20 @@ describe('FileBrowser OS file dropzone', () => {
     expect(h.uploadFolderAsset.mock.calls[0]![1]).toBe('chart.png')
   })
 
+  it('intercepts a file drop at the vault root (no folder) instead of letting the browser open it', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+    render(createElement(QueryClientProvider, { client }, createElement(FileBrowser, { folderId: null })))
+
+    // The window-level listeners attach on mount. Dropping an OS file at the
+    // root must be intercepted (preventDefault → fireEvent returns false) so the
+    // browser never opens the file in a new tab; with no folder we only guide.
+    const defaultPrevented =
+      fireEvent.drop(document.body, dragData([file('page.html', 'text/html', '<h1>Hi</h1>')])) === false
+    expect(defaultPrevented).toBe(true)
+    expect(h.uploadFolderAsset).not.toHaveBeenCalled()
+    expect((await screen.findByRole('status')).textContent).toContain('Open a folder')
+  })
+
   it('uses the HTML asset path for extension-only HTML files', async () => {
     renderBrowser('owner')
 
