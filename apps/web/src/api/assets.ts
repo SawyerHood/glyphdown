@@ -95,7 +95,12 @@ function assetVersionMeta(row: AssetVersionRow, currentVersionId: string | null)
 }
 
 async function inAssetTransaction<T>(db: Db, fn: (tx: Db) => Promise<T>): Promise<T> {
-  return db.transaction((tx) => fn(tx as unknown as Db))
+  // D1 has no interactive transactions — drizzle's `db.transaction()` issues a
+  // BEGIN that D1 rejects ("Failed query: begin"). The append-version sequence
+  // reads between writes (so it can't be a single `db.batch()` either), so run
+  // it sequentially against the same db. This matches the non-atomic model the
+  // rest of the app already uses on D1; concurrent uploads stay last-writer-wins.
+  return fn(db)
 }
 
 function scopeFilter(scope: AssetScope) {
