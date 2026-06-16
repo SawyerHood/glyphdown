@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { Comment, DocMeta, PushResponse, ShareLinkRole } from '@glyphdown/protocol'
+import type { AssetVersionMeta, Comment, DocMeta, PushResponse, ShareLinkRole, VersionMeta } from '@glyphdown/protocol'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Api } from '../src/index.ts'
 import { CliError, createProgram, sha256Hex, writePull } from '../src/index.ts'
@@ -28,6 +28,27 @@ const DOC: DocMeta = {
   updatedAt: 2,
 }
 
+const DOC_VERSION: VersionMeta = {
+  id: 'ver1',
+  createdAt: 3,
+  name: 'before rewrite',
+  authorIds: ['u1'],
+  kind: 'named',
+  sizeBytes: 10,
+}
+
+const ASSET_VERSION: AssetVersionMeta = {
+  id: 'av1',
+  assetId: 'asset-page',
+  contentHash: 'hash1',
+  size: 42,
+  etag: 'etag1',
+  createdBy: 'u1',
+  createdAt: 4,
+  message: 'initial upload',
+  current: true,
+}
+
 function fakeApi(overrides: Partial<Api> = {}): Api {
   return {
     me: vi.fn(async () => ({ id: 'u1', type: 'user' as const, name: 'kirby' })),
@@ -47,14 +68,9 @@ function fakeApi(overrides: Partial<Api> = {}): Api {
     replyToComment: vi.fn(),
     resolveComment: vi.fn(async () => undefined),
     listSuggestions: vi.fn(async () => []),
-    createVersion: vi.fn(async () => ({
-      id: 'ver1',
-      createdAt: 3,
-      name: 'before rewrite',
-      authorIds: ['u1'],
-      kind: 'named' as const,
-      sizeBytes: 10,
-    })),
+    listVersions: vi.fn(async () => [DOC_VERSION]),
+    getVersionText: vi.fn(async () => '# Old\n'),
+    createVersion: vi.fn(async () => DOC_VERSION),
     listDocShareLinks: vi.fn(async () => [{ token: 'tok1', role: 'viewer' as const, createdAt: 5 }]),
     createDocShareLink: vi.fn(async (_docId: string, role: ShareLinkRole) => ({ token: 'tok-new', role, createdAt: 6 })),
     revokeDocShareLink: vi.fn(async () => undefined),
@@ -67,6 +83,18 @@ function fakeApi(overrides: Partial<Api> = {}): Api {
     downloadFolderAsset: vi.fn(async () => ({ data: new Uint8Array(), etag: null, contentType: null })),
     uploadDocAsset: vi.fn(),
     uploadFolderAsset: vi.fn(),
+    listDocAssetComments: vi.fn(async () => []),
+    listFolderAssetComments: vi.fn(async () => []),
+    createDocAssetComment: vi.fn(),
+    createFolderAssetComment: vi.fn(),
+    replyToDocAssetComment: vi.fn(),
+    replyToFolderAssetComment: vi.fn(),
+    resolveDocAssetComment: vi.fn(async () => undefined),
+    resolveFolderAssetComment: vi.fn(async () => undefined),
+    listDocAssetVersions: vi.fn(async () => [ASSET_VERSION]),
+    listFolderAssetVersions: vi.fn(async () => [ASSET_VERSION]),
+    nameDocAssetVersion: vi.fn(async () => ASSET_VERSION),
+    nameFolderAssetVersion: vi.fn(async () => ASSET_VERSION),
     ...overrides,
   }
 }
@@ -382,6 +410,112 @@ describe('ink comment', () => {
     expect(api.replyToComment).toHaveBeenCalledWith('doc1', 'c9', 'done')
     expect(api.resolveComment).toHaveBeenCalledWith('doc1', 'c9', true)
   })
+
+  it('lists asset comments from an HTML viewer URL', async () => {
+    const comment = {
+      id: 'c1',
+      anchor: null,
+      anchorKind: null,
+      authorId: 'u1',
+      authorName: 'kirby',
+      body: 'whole file',
+      createdAt: 1,
+      resolved: false,
+      reactions: {},
+      replies: [],
+    } satisfies Comment
+    const api = fakeApi({ listFolderAssetComments: vi.fn(async () => [comment]) })
+    const h = harness(tmp(), api)
+
+    await h.run(['comments', 'https://ink.example/f/f1/file/page.html', '--json'])
+
+    expect(api.listFolderAssetComments).toHaveBeenCalledWith('f1', 'page.html')
+    expect(JSON.parse(h.lines.join('\n'))).toEqual([comment])
+  })
+
+  it('creates file-level asset comments from a folder + filename ref', async () => {
+    const api = fakeApi({
+      listFolders: vi.fn(async () => [{ id: 'f1', name: 'Research', kind: 'folder' as const, parentId: null, ownerUserId: 'u1', role: 'editor' as const, createdAt: 1 }]),
+      createFolderAssetComment: vi.fn(async () => ({ id: 'c-html' }) as unknown as Comment),
+    })
+    const h = harness(tmp(), api)
+
+    await h.run(['comment', 'page.html', '--folder', 'Research', '--body', 'Needs a summary'])
+
+    expect(api.createFolderAssetComment).toHaveBeenCalledWith('f1', 'page.html', { body: 'Needs a summary' })
+    expect(h.lines.join('\n')).toContain('c-html')
+  })
+
+  it('replies to and resolves doc-scoped asset comments', async () => {
+    const api = fakeApi({
+      replyToDocAssetComment: vi.fn(async () => ({ id: 'r-html' }) as unknown as Awaited<ReturnType<Api['replyToDocAssetComment']>>),
+    })
+    const h = harness(tmp(), api)
+
+    await h.run(['comment', 'page.html', '--doc', 'doc1', '--resolve', 'c-html', '--body', 'fixed'])
+
+    expect(api.replyToDocAssetComment).toHaveBeenCalledWith('doc1', 'page.html', 'c-html', 'fixed')
+    expect(api.resolveDocAssetComment).toHaveBeenCalledWith('doc1', 'page.html', 'c-html', true)
+  })
+
+  it('rejects line-anchored asset comments because CLI asset creation is file-level only', async () => {
+    const api = fakeApi()
+    const h = harness(tmp(), api)
+
+    await expect(h.run(['comment', 'https://ink.example/f/f1/file/page.html', '--line', '3', '--body', 'here'])).rejects.toSatisfy(
+      (error: unknown) => {
+        expect((error as CliError).exitCode).toBe(1)
+        expect((error as CliError).message).toContain('--line is only valid')
+        return true
+      },
+    )
+    expect(api.createFolderAssetComment).not.toHaveBeenCalled()
+  })
+})
+
+describe('glyphdown cat/history for versions', () => {
+  it('prints a doc version with cat --version', async () => {
+    const api = fakeApi()
+    const h = harness(tmp(), api)
+
+    await h.run(['cat', 'doc1', '--version', 'ver1'])
+
+    expect(api.getVersionText).toHaveBeenCalledWith('doc1', 'ver1')
+    expect(h.lines.join('\n')).toBe('# Old\n')
+  })
+
+  it('prints an asset version with cat --version', async () => {
+    const data = new TextEncoder().encode('<h1>Old</h1>')
+    const api = fakeApi({
+      downloadFolderAsset: vi.fn(async () => ({ data, etag: 'etag-old', contentType: 'text/html' })),
+    })
+    const h = harness(tmp(), api)
+
+    await h.run(['cat', 'https://ink.example/f/f1/file/page.html', '--version', 'av1', '--json'])
+
+    expect(api.downloadFolderAsset).toHaveBeenCalledWith('f1', 'page.html', 'av1')
+    expect(JSON.parse(h.lines.join('\n'))).toMatchObject({
+      target: 'asset',
+      scope: 'folder',
+      id: 'f1',
+      filename: 'page.html',
+      versionId: 'av1',
+      text: '<h1>Old</h1>',
+    })
+  })
+
+  it('lists doc and asset history', async () => {
+    const api = fakeApi()
+    const doc = harness(tmp(), api)
+    await doc.run(['history', 'doc1', '--json'])
+    expect(api.listVersions).toHaveBeenCalledWith('doc1')
+    expect(JSON.parse(doc.lines.join('\n'))).toEqual([DOC_VERSION])
+
+    const asset = harness(tmp(), api)
+    await asset.run(['history', 'https://ink.example/f/f1/file/page.html', '--json'])
+    expect(api.listFolderAssetVersions).toHaveBeenCalledWith('f1', 'page.html')
+    expect(JSON.parse(asset.lines.join('\n'))).toEqual([ASSET_VERSION])
+  })
 })
 
 describe('glyphdown share', () => {
@@ -526,5 +660,16 @@ describe('ink snapshot', () => {
     await h.run(['snapshot', 'doc1', '-m', 'before rewrite'])
     expect(api.createVersion).toHaveBeenCalledWith('doc1', 'before rewrite')
     expect(h.lines.join('\n')).toContain('ver1')
+  })
+
+  it('names the current asset version', async () => {
+    const api = fakeApi()
+    const h = harness(tmp(), api)
+
+    await h.run(['snapshot', 'https://ink.example/f/f1/file/page.html', '-m', 'baseline'])
+
+    expect(api.listFolderAssetVersions).toHaveBeenCalledWith('f1', 'page.html')
+    expect(api.nameFolderAssetVersion).toHaveBeenCalledWith('f1', 'page.html', 'av1', 'baseline')
+    expect(h.lines.join('\n')).toContain('av1')
   })
 })

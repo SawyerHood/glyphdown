@@ -1,9 +1,53 @@
 import { Link, createFileRoute } from '@tanstack/react-router'
-import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, Download, ExternalLink, FileCode2, FolderX } from 'lucide-react'
-import { assetKindForContentType, type AssetMeta } from '@glyphdown/protocol'
-import { ApiError, folderAssetUrl, getFolderListing } from '../lib/api.ts'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowLeft, Download, ExternalLink, FileCode2, FolderX, MessageSquare, MessageSquarePlus, X } from 'lucide-react'
+import { assetKindForContentType, roleAtLeast, type AssetMeta, type Comment, type NodeAnchor, type Principal, type Role } from '@glyphdown/protocol'
+import {
+  ApiError,
+  createFolderAssetComment,
+  fetchMe,
+  fetchFolderAssetCommentingView,
+  folderAssetUrl,
+  getFolderListing,
+  listFolderAssetComments,
+  listFolderMembers,
+  reattachFolderAssetComment,
+  replyToFolderAssetComment,
+  setFolderAssetCommentResolved,
+  toggleFolderAssetCommentReaction,
+  type MemberInfo,
+} from '../lib/api.ts'
+import {
+  isHtmlCommentsFrameMessage,
+  type HtmlCommentsParentMessage,
+} from '../runtime/html-comments.ts'
+import { track } from '../lib/analytics.ts'
+import { useIsMobile } from '../lib/useMediaQuery.ts'
 import { Spinner } from '../components/ui.tsx'
+import CommentThreadList, {
+  type CommentAnchorPreview,
+  type CommentThreadDescriptor,
+  type CommentThreadService,
+} from '../components/editor/CommentThreadList.tsx'
+
+type HtmlCommentsParentCommand =
+  | { t: 'gd:set-mode'; mode: 'browse' | 'pick' }
+  | { t: 'gd:set-markers'; markers: Array<{ id: string; anchor: NodeAnchor }> }
+  | { t: 'gd:focus-marker'; id: string }
+
+type MarkerResolution = { status: 'anchored' | 'orphaned'; domHint?: number; label?: string }
+
+const folderAssetCommentsKey = (folderId: string, filename: string, share?: string) =>
+  ['folder-asset-comments', folderId, filename, share ?? null] as const
+
+function upsertById<T extends { id: string }>(list: T[] | undefined, item: T): T[] {
+  const next = [...(list ?? [])]
+  const idx = next.findIndex((x) => x.id === item.id)
+  if (idx >= 0) next[idx] = item
+  else next.push(item)
+  return next
+}
 
 /**
  * Standalone folder HTML asset viewer. The CLI prints this exact URL shape:
@@ -52,23 +96,273 @@ function FolderHtmlAssetViewer() {
     return <HtmlAssetNotFound folderId={folderId} filename={filename} share={share} />
   }
 
-  return <HtmlAssetViewerChrome folderId={folderId} filename={asset.filename} folderName={folder.name} share={share} asset={asset} />
+  return (
+    <HtmlAssetViewerChrome
+      folderId={folderId}
+      filename={asset.filename}
+      folderName={folder.name}
+      folderRole={folder.role}
+      share={share}
+      asset={asset}
+    />
+  )
 }
 
 export function HtmlAssetViewerChrome({
   folderId,
   filename,
   folderName,
+  folderRole = 'viewer',
   share,
   asset,
 }: {
   folderId: string
   filename: string
   folderName?: string | undefined
+  folderRole?: Role | undefined
   share?: string | undefined
   asset?: AssetMeta | undefined
 }) {
   const rawUrl = folderAssetUrl(folderId, filename, share)
+  const queryClient = useQueryClient()
+  const isMobile = useIsMobile()
+  const iframeRef = useRef<HTMLIFrameElement | null>(null)
+  const [frameReady, setFrameReady] = useState(false)
+  const [picking, setPicking] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [activeCommentId, setActiveCommentId] = useState<string | null>(null)
+  const [pendingAnchor, setPendingAnchor] = useState<NodeAnchor | null>(null)
+  const [reattachTarget, setReattachTarget] = useState<Comment | null>(null)
+  const [markerResolutions, setMarkerResolutions] = useState<Record<string, MarkerResolution>>({})
+  const [error, setError] = useState<string | null>(null)
+
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: fetchMe, staleTime: 60_000, retry: false })
+  const me: Principal | null = meQuery.data ?? null
+  const canComment = me !== null && roleAtLeast(folderRole, 'commenter')
+
+  const viewQuery = useQuery({
+    queryKey: ['folder-asset-commenting-view', folderId, filename, share ?? null],
+    queryFn: () => fetchFolderAssetCommentingView(folderId, filename, share),
+    retry: false,
+    staleTime: 30_000,
+  })
+
+  const commentsQuery = useQuery({
+    queryKey: folderAssetCommentsKey(folderId, filename, share),
+    queryFn: () => listFolderAssetComments(folderId, filename, share),
+    enabled: viewQuery.isSuccess,
+    retry: false,
+    refetchInterval: 5_000,
+  })
+  const comments = commentsQuery.data ?? []
+
+  const membersQuery = useQuery({
+    queryKey: ['folder-members', folderId, share ?? null],
+    queryFn: () => listFolderMembers(folderId, share),
+    enabled: me !== null,
+    retry: false,
+    staleTime: 60_000,
+  })
+  const members: MemberInfo[] = membersQuery.data ?? []
+
+  const report = useCallback((err: unknown) => {
+    const message = err instanceof Error ? err.message : 'Something went wrong'
+    setError(message)
+    setTimeout(() => setError(null), 4000)
+  }, [])
+
+  const upsertComment = useCallback(
+    (comment: Comment) =>
+      queryClient.setQueryData<Comment[]>(folderAssetCommentsKey(folderId, filename, share), (old) => upsertById(old, comment)),
+    [filename, folderId, queryClient, share],
+  )
+
+  const markerPayload = useMemo(
+    () =>
+      comments
+        .filter((comment) => !comment.resolved && comment.anchorKind === 'node' && comment.nodeAnchor !== undefined)
+        .map((comment) => ({ id: comment.id, anchor: comment.nodeAnchor! })),
+    [comments],
+  )
+
+  const postToFrame = useCallback(
+    (message: HtmlCommentsParentCommand) => {
+      const nonce = viewQuery.data?.nonce
+      const target = iframeRef.current?.contentWindow
+      if (!nonce || !target) return
+      target.postMessage({ ...message, version: 1, nonce } as HtmlCommentsParentMessage, '*')
+    },
+    [viewQuery.data?.nonce],
+  )
+
+  const handlePickedAnchor = useCallback(
+    (anchor: NodeAnchor) => {
+      setPicking(false)
+      if (!canComment) return
+      if (reattachTarget) {
+        void (async () => {
+          try {
+            const updated = await reattachFolderAssetComment(
+              folderId,
+              filename,
+              reattachTarget.id,
+              { nodeAnchor: anchor },
+              share,
+            )
+            upsertComment(updated)
+            setActiveCommentId(updated.id)
+            setReattachTarget(null)
+            setSidebarOpen(true)
+          } catch (err) {
+            report(err)
+          }
+        })()
+        return
+      }
+      setPendingAnchor(anchor)
+      setSidebarOpen(true)
+    },
+    [canComment, filename, folderId, reattachTarget, report, share, upsertComment],
+  )
+
+  useEffect(() => {
+    setFrameReady(false)
+    setPendingAnchor(null)
+    setReattachTarget(null)
+    setMarkerResolutions({})
+    setPicking(false)
+  }, [viewQuery.data?.html])
+
+  useEffect(() => {
+    const iframe = iframeRef.current
+    const nonce = viewQuery.data?.nonce
+    if (!iframe || !nonce) return
+
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== iframe.contentWindow) return
+      if (!isHtmlCommentsFrameMessage(event.data, nonce)) return
+      if (event.data.t === 'gd:ready') {
+        setFrameReady(true)
+      } else if (event.data.t === 'gd:select') {
+        handlePickedAnchor(event.data.anchor)
+      } else if (event.data.t === 'gd:markers-resolved') {
+        const next: Record<string, MarkerResolution> = {}
+        for (const marker of event.data.markers) {
+          next[marker.id] = {
+            status: marker.status,
+            ...(marker.domHint !== undefined ? { domHint: marker.domHint } : {}),
+            ...(marker.label !== undefined ? { label: marker.label } : {}),
+          }
+        }
+        setMarkerResolutions(next)
+      } else if (event.data.t === 'gd:marker-click') {
+        setActiveCommentId(event.data.id)
+        setPendingAnchor(null)
+        setReattachTarget(null)
+        setPicking(false)
+        setSidebarOpen(true)
+        postToFrame({ t: 'gd:focus-marker', id: event.data.id })
+      }
+    }
+
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [handlePickedAnchor, postToFrame, viewQuery.data?.nonce])
+
+  useEffect(() => {
+    if (!frameReady) return
+    postToFrame({ t: 'gd:set-mode', mode: picking ? 'pick' : 'browse' })
+  }, [frameReady, picking, postToFrame])
+
+  useEffect(() => {
+    if (!frameReady) return
+    postToFrame({ t: 'gd:set-markers', markers: markerPayload })
+  }, [frameReady, markerPayload, postToFrame])
+
+  const pendingPreview = useCallback((anchor: NodeAnchor): CommentAnchorPreview => previewForNodeAnchor(anchor), [])
+  const analyticsTargetId = asset?.id ?? folderId
+
+  const describeComment = useCallback(
+    (comment: Comment): CommentThreadDescriptor => {
+      if (comment.anchorKind !== 'node' || comment.nodeAnchor === undefined) return { bucket: 'document' }
+      const runtime = markerResolutions[comment.id]
+      const orphaned = comment.nodeAnchor.status === 'orphaned' || runtime?.status === 'orphaned'
+      const preview = previewForNodeAnchor(comment.nodeAnchor, runtime, orphaned)
+      if (orphaned) return { bucket: 'orphaned', preview }
+      return { bucket: 'anchored', sortKey: runtime?.domHint ?? comment.nodeAnchor.domHint, preview }
+    },
+    [markerResolutions],
+  )
+
+  const service = useMemo<CommentThreadService<NodeAnchor>>(
+    () => ({
+      upsert: upsertComment,
+      createPending: async (anchor, body) => {
+        const created = await createFolderAssetComment(folderId, filename, { body, nodeAnchor: anchor }, share)
+        track('comment_created', { docId: analyticsTargetId, kind: 'anchored' })
+        return created
+      },
+      createDocument: async (body) => {
+        const created = await createFolderAssetComment(folderId, filename, { body }, share)
+        track('comment_created', { docId: analyticsTargetId, kind: 'doc-level' })
+        return created
+      },
+      reply: async (comment, body) => {
+        const reply = await replyToFolderAssetComment(folderId, filename, comment.id, body, share)
+        track('comment_created', { docId: analyticsTargetId, kind: 'reply' })
+        return { ...comment, replies: [...comment.replies, reply] }
+      },
+      toggleResolve: async (comment) => {
+        const { resolved } = await setFolderAssetCommentResolved(folderId, filename, comment.id, !comment.resolved, share)
+        return { ...comment, resolved }
+      },
+      react: (comment, emoji) => toggleFolderAssetCommentReaction(folderId, filename, comment.id, emoji, share),
+      reattach: async (comment) => {
+        setReattachTarget(comment)
+        setPendingAnchor(null)
+        setPicking(true)
+        if (isMobile) setSidebarOpen(false)
+        return null
+      },
+    }),
+    [analyticsTargetId, filename, folderId, isMobile, share, upsertComment],
+  )
+
+  const selectThread = useCallback(
+    (comment: Comment) => {
+      setActiveCommentId(comment.id)
+      setPendingAnchor(null)
+      if (comment.anchorKind === 'node') postToFrame({ t: 'gd:focus-marker', id: comment.id })
+    },
+    [postToFrame],
+  )
+
+  const openComments = comments.filter((comment) => !comment.resolved).length
+  const pickingLabel = reattachTarget ? 'Pick a new element' : 'Pick an element'
+  const sidebar = (
+    <CommentThreadList
+      comments={comments}
+      me={me}
+      canComment={canComment}
+      members={members}
+      activeCommentId={activeCommentId}
+      onSelect={selectThread}
+      pending={pendingAnchor}
+      pendingPreview={pendingPreview}
+      onPendingDone={() => setPendingAnchor(null)}
+      describeComment={describeComment}
+      service={service}
+      report={report}
+      emptyHint={canComment ? 'Pick an element in the HTML file to add an anchored comment.' : 'Sign in with comment access to join the discussion.'}
+      documentLabel="File"
+      documentActionLabel="Comment on the HTML file"
+      documentPlaceholder="Comment on the whole HTML file…"
+      orphanedDescription="The elements these comments were anchored to were removed or changed."
+      canReattach={() => frameReady}
+      reattachTitle={() => (frameReady ? 'Pick a new element in the HTML file' : 'Wait for the HTML file to load')}
+    />
+  )
+
   return (
     <div className="flex min-h-screen flex-col bg-[var(--bg-base)]">
       <header className="flex h-12 shrink-0 items-center gap-3 border-b border-[var(--line)] bg-[var(--paper)] px-3 sm:px-4">
@@ -92,12 +386,52 @@ export function HtmlAssetViewerChrome({
         )}
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <FileCode2 size={16} className="shrink-0 text-[var(--ink-faint)]" />
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <p className="m-0 truncate text-sm font-semibold text-[var(--ink)]">{filename}</p>
-            {folderName ? <p className="m-0 truncate text-[11px] text-[var(--ink-faint)]">{folderName}</p> : null}
+            <p className="m-0 truncate text-[11px] text-[var(--ink-faint)]">
+              {reattachTarget
+                ? `Re-attaching ${labelForComment(reattachTarget)}`
+                : pendingAnchor
+                  ? `Selected ${pendingAnchor.label}`
+                  : folderName}
+            </p>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
+          <button
+            type="button"
+            title="Comments"
+            className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition ${
+              sidebarOpen
+                ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--ink)]'
+                : 'border-[var(--line)] bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-soft)]'
+            }`}
+            onClick={() => setSidebarOpen((value) => !value)}
+          >
+            <MessageSquare size={13} />
+            {openComments > 0 ? <span className="text-[11px] font-semibold">{openComments}</span> : null}
+          </button>
+          {canComment ? (
+            <button
+              type="button"
+              title={picking ? 'Cancel pick' : 'Pick an element to comment on'}
+              className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition ${
+                picking
+                  ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+                  : 'border-[var(--line)] bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-soft)]'
+              }`}
+              onClick={() => {
+                setPicking((value) => {
+                  if (value) setReattachTarget(null)
+                  return !value
+                })
+              }}
+              disabled={!frameReady}
+            >
+              <MessageSquarePlus size={13} />
+              <span className="hidden sm:inline">{picking ? pickingLabel : 'Comment'}</span>
+            </button>
+          ) : null}
           <a
             href={rawUrl}
             target="_blank"
@@ -118,15 +452,99 @@ export function HtmlAssetViewerChrome({
           </a>
         </div>
       </header>
-      <iframe
-        title={filename}
-        sandbox="allow-scripts"
-        src={rawUrl}
-        className="min-h-0 flex-1 border-0 bg-white"
-        data-asset-id={asset?.id}
-      />
+      {error ? <div className="bg-red-600 px-4 py-1.5 text-center text-xs font-medium text-white">{error}</div> : null}
+      <div className="flex min-h-0 flex-1">
+        <div className="relative min-w-0 flex-1 bg-white">
+          {viewQuery.isLoading ? (
+            <div className="grid h-full min-h-0 place-items-center bg-white">
+              <Spinner label="Loading HTML file..." />
+            </div>
+          ) : viewQuery.isError || !viewQuery.data ? (
+            <div className="grid h-full min-h-0 place-items-center bg-white px-4 text-center">
+              <p className="m-0 text-sm font-medium text-[var(--ink-soft)]">This HTML file could not be opened.</p>
+            </div>
+          ) : (
+            <iframe
+              ref={iframeRef}
+              title={filename}
+              sandbox="allow-scripts"
+              srcDoc={viewQuery.data.html}
+              className="h-full min-h-0 w-full border-0 bg-white"
+              data-asset-id={asset?.id}
+            />
+          )}
+          {isMobile && picking && !sidebarOpen ? (
+            <button
+              type="button"
+              onClick={() => {
+                setPicking(false)
+                setReattachTarget(null)
+              }}
+              className="fixed bottom-[calc(1.25rem+env(safe-area-inset-bottom))] left-1/2 z-40 flex -translate-x-1/2 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--paper)] px-5 py-3 text-sm font-medium text-[var(--ink)] shadow-lg"
+            >
+              <MessageSquarePlus size={16} /> {pickingLabel}
+            </button>
+          ) : null}
+        </div>
+
+        {sidebarOpen ? (
+          <>
+            <div
+              className="fixed inset-0 z-[65] bg-black/40 lg:hidden"
+              onClick={() => setSidebarOpen(false)}
+              aria-hidden
+            />
+            <aside
+              aria-label="HTML file comments"
+              className="fixed inset-x-0 bottom-0 z-[70] flex h-[70dvh] flex-col rounded-t-2xl border-t border-[var(--line)] bg-[var(--paper)] pb-[env(safe-area-inset-bottom)] shadow-2xl lg:static lg:z-auto lg:h-auto lg:w-[22rem] lg:shrink-0 lg:rounded-none lg:border-l lg:border-t-0 lg:pb-0 lg:shadow-none"
+            >
+              <div className="flex items-center justify-center pt-2 lg:hidden" aria-hidden>
+                <span className="h-1 w-9 rounded-full bg-[var(--line)]" />
+              </div>
+              <div className="flex shrink-0 items-center border-b border-[var(--line)] px-3 py-2">
+                <p className="m-0 flex-1 text-sm font-medium text-[var(--ink)]">
+                  Comments{openComments > 0 ? ` (${openComments})` : ''}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setSidebarOpen(false)}
+                  aria-label="Close comments"
+                  className="rounded-md p-1 text-[var(--ink-soft)] hover:bg-[var(--paper-soft)] hover:text-[var(--ink)] lg:hidden"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                {commentsQuery.isLoading ? (
+                  <div className="py-8 text-center">
+                    <Spinner label="Loading comments..." />
+                  </div>
+                ) : (
+                  sidebar
+                )}
+              </div>
+            </aside>
+          </>
+        ) : null}
+      </div>
     </div>
   )
+}
+
+function previewForNodeAnchor(
+  anchor: NodeAnchor,
+  runtime?: MarkerResolution,
+  orphaned = anchor.status === 'orphaned',
+): CommentAnchorPreview {
+  return {
+    ...(runtime?.label ?? anchor.label ? { label: runtime?.label ?? anchor.label } : {}),
+    ...(anchor.quote?.exact ? { quote: anchor.quote.exact } : {}),
+    ...(orphaned ? { orphaned: true } : {}),
+  }
+}
+
+function labelForComment(comment: Comment): string {
+  return comment.nodeAnchor?.label ?? comment.body.slice(0, 40)
 }
 
 function HtmlAssetErrorCard({

@@ -2,8 +2,10 @@ import { YServer } from 'y-partyserver'
 import { getServerByName } from 'partyserver'
 import type { Connection, ConnectionContext, WSMessage } from 'partyserver'
 import { SEARCH_DO_NAME, type SearchDO } from './search-do.ts'
+import type { HtmlDocDO } from './html-doc-do.ts'
 import * as Y from 'yjs'
 import {
+  type Anchor,
   acceptSuggestion,
   cleanText,
   computeMergedTarget,
@@ -29,12 +31,11 @@ import {
   roleAtLeast,
 } from '@glyphdown/protocol'
 import {
+  CommentStore,
+  TextAnchorStrategy,
   type StoredSuggestion,
-  buildComment,
-  buildReply,
-  reattachComment,
-  revalidateAnchors,
-  toggleReaction,
+  revalidateSuggestions,
+  textCommentAnchors,
 } from './sidecar.ts'
 import { decidePushWindow } from './ratelimit.ts'
 import {
@@ -73,6 +74,8 @@ interface ConnState {
 /** Bindings the host Worker must provide (apps/web wrangler.jsonc). */
 export interface SyncEnv {
   DocDO: DurableObjectNamespace<DocDO>
+  /** Per-HTML-asset comment/index sidecar (html-doc-do.ts). */
+  HtmlDocDO: DurableObjectNamespace<HtmlDocDO>
   /** Global full-text/wiki-link index (search-do.ts) — fed fire-and-forget. */
   SearchDO: DurableObjectNamespace<SearchDO>
   /** D1 metadata database (auth/docs/ACLs) — unused by the DO itself, but
@@ -125,6 +128,18 @@ export class DocDO extends YServer<SyncEnv> {
 
   private get ytext(): Y.Text {
     return this.document.getText('content')
+  }
+
+  private commentStore(): CommentStore<Anchor, Y.Text> {
+    return new CommentStore({
+      content: () => this.ytext,
+      strategy: TextAnchorStrategy,
+      anchors: textCommentAnchors,
+      all: () => this.allComments(),
+      load: (id) => this.loadComment(id),
+      save: (comment) => this.saveComment(comment),
+      broadcast: (comment) => this.broadcastEvent({ t: 'comment', comment }),
+    })
   }
 
   // -------------------------------------------------------------------------
@@ -565,54 +580,34 @@ export class DocDO extends YServer<SyncEnv> {
   // -------------------------------------------------------------------------
 
   private handleCreateComment(payload: CreateCommentRequest | null, principal: Principal): Response {
-    const built = buildComment(this.ytext, principal, payload?.body, payload?.range)
+    const built = this.commentStore().create(principal, payload?.body, payload?.range)
     if (!built.ok) return json({ error: built.error }, 400)
-    this.saveComment(built.value)
-    this.broadcastEvent({ t: 'comment', comment: built.value })
     return json(built.value)
   }
 
   private handleReply(commentId: string, payload: Record<string, unknown> | null, principal: Principal): Response {
-    const comment = this.loadComment(commentId)
-    if (!comment) return json({ error: 'not-found' }, 404)
-    const built = buildReply(principal, payload?.body)
-    if (!built.ok) return json({ error: built.error }, 400)
-    const updated: Comment = { ...comment, replies: [...comment.replies, built.value] }
-    this.saveComment(updated)
-    this.broadcastEvent({ t: 'comment', comment: updated })
+    const result = this.commentStore().reply(commentId, principal, payload?.body)
+    if (!result.ok) return json({ error: result.error }, result.error === 'not-found' ? 404 : 400)
     // Root author rides a header so the Worker proxy can notify them (§9)
     // without changing the response body the clients consume.
-    return json(built.value, 200, { [HEADER_COMMENT_AUTHOR]: comment.authorId })
+    return json(result.value.reply, 200, { [HEADER_COMMENT_AUTHOR]: result.value.rootAuthorId })
   }
 
   private handleResolve(commentId: string, payload: Record<string, unknown> | null): Response {
-    const comment = this.loadComment(commentId)
-    if (!comment) return json({ error: 'not-found' }, 404)
-    const resolved = typeof payload?.resolved === 'boolean' ? payload.resolved : !comment.resolved
-    const updated: Comment = { ...comment, resolved }
-    this.saveComment(updated)
-    this.broadcastEvent({ t: 'comment', comment: updated })
-    return json({ resolved })
+    const result = this.commentStore().resolve(commentId, payload?.resolved)
+    if (!result.ok) return json({ error: result.error }, 404)
+    return json({ resolved: result.value.resolved })
   }
 
   private handleReaction(commentId: string, payload: Record<string, unknown> | null, principal: Principal): Response {
-    const comment = this.loadComment(commentId)
-    if (!comment) return json({ error: 'not-found' }, 404)
-    const emoji = payload?.emoji
-    if (typeof emoji !== 'string' || emoji.length === 0 || emoji.length > 32) return json({ error: 'bad-emoji' }, 400)
-    const updated: Comment = { ...comment, reactions: toggleReaction(comment.reactions, emoji, principal.id) }
-    this.saveComment(updated)
-    this.broadcastEvent({ t: 'comment', comment: updated })
-    return json(updated)
+    const result = this.commentStore().react(commentId, payload?.emoji, principal)
+    if (!result.ok) return json({ error: result.error }, result.error === 'not-found' ? 404 : 400)
+    return json(result.value)
   }
 
   private handleReattach(commentId: string, payload: Record<string, unknown> | null): Response {
-    const comment = this.loadComment(commentId)
-    if (!comment) return json({ error: 'not-found' }, 404)
-    const result = reattachComment(this.ytext, comment, payload)
-    if (!result.ok) return json({ error: result.error }, 400)
-    this.saveComment(result.value)
-    this.broadcastEvent({ t: 'comment', comment: result.value })
+    const result = this.commentStore().reattach(commentId, payload)
+    if (!result.ok) return json({ error: result.error }, result.error === 'not-found' ? 404 : 400)
     return json(result.value)
   }
 
@@ -761,11 +756,8 @@ export class DocDO extends YServer<SyncEnv> {
    * suggestions whose anchors orphaned.
    */
   private revalidateAfterRewrite(origin: unknown): void {
-    const result = revalidateAnchors(this.ytext, this.allComments(), this.openSuggestions(), origin)
-    for (const comment of result.comments) {
-      this.saveComment(comment)
-      this.broadcastEvent({ t: 'comment', comment })
-    }
+    this.commentStore().revalidate()
+    const result = revalidateSuggestions(this.ytext, this.openSuggestions(), origin)
     for (const suggestion of result.suggestions) {
       this.saveSuggestion(suggestion)
       this.broadcastEvent({ t: 'suggestion', suggestion })

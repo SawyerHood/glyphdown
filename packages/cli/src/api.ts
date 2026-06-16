@@ -1,8 +1,10 @@
 import { normalizeEol } from '@glyphdown/core'
 import type {
   AssetMeta,
+  AssetVersionMeta,
   Comment,
   CommentReply,
+  CreateAssetCommentRequest,
   DocMeta,
   FolderMeta,
   Principal,
@@ -91,6 +93,8 @@ export interface Api {
   replyToComment(docId: string, commentId: string, body: string): Promise<CommentReply>
   resolveComment(docId: string, commentId: string, resolved?: boolean): Promise<void>
   listSuggestions(docId: string): Promise<SuggestionRecord[]>
+  listVersions(docId: string): Promise<VersionMeta[]>
+  getVersionText(docId: string, versionId: string): Promise<string>
   createVersion(docId: string, name: string): Promise<VersionMeta>
   /**
    * Share links (anyone-with-link grants) — owner-only on the target; the
@@ -105,8 +109,8 @@ export interface Api {
   /** Asset surface: doc routes resolve the namespace (folder or doc) server-side. */
   listDocAssets(docId: string): Promise<AssetMeta[]>
   listFolderAssets(folderId: string): Promise<AssetMeta[]>
-  downloadDocAsset(docId: string, filename: string): Promise<AssetDownload>
-  downloadFolderAsset(folderId: string, filename: string): Promise<AssetDownload>
+  downloadDocAsset(docId: string, filename: string, versionId?: string): Promise<AssetDownload>
+  downloadFolderAsset(folderId: string, filename: string, versionId?: string): Promise<AssetDownload>
   uploadDocAsset(
     docId: string,
     filename: string,
@@ -121,6 +125,18 @@ export interface Api {
     contentType: string,
     overwrite?: boolean,
   ): Promise<UploadAssetResponse>
+  listDocAssetComments(docId: string, filename: string): Promise<Comment[]>
+  listFolderAssetComments(folderId: string, filename: string): Promise<Comment[]>
+  createDocAssetComment(docId: string, filename: string, input: CreateAssetCommentRequest): Promise<Comment>
+  createFolderAssetComment(folderId: string, filename: string, input: CreateAssetCommentRequest): Promise<Comment>
+  replyToDocAssetComment(docId: string, filename: string, commentId: string, body: string): Promise<CommentReply>
+  replyToFolderAssetComment(folderId: string, filename: string, commentId: string, body: string): Promise<CommentReply>
+  resolveDocAssetComment(docId: string, filename: string, commentId: string, resolved?: boolean): Promise<void>
+  resolveFolderAssetComment(folderId: string, filename: string, commentId: string, resolved?: boolean): Promise<void>
+  listDocAssetVersions(docId: string, filename: string): Promise<AssetVersionMeta[]>
+  listFolderAssetVersions(folderId: string, filename: string): Promise<AssetVersionMeta[]>
+  nameDocAssetVersion(docId: string, filename: string, versionId: string, name: string): Promise<AssetVersionMeta>
+  nameFolderAssetVersion(folderId: string, filename: string, versionId: string, name: string): Promise<AssetVersionMeta>
 }
 
 function mapError(status: number, bodyText: string, retryAfter?: string | null): CliError {
@@ -298,6 +314,22 @@ export function createApi(opts: ApiOptions): Api {
       return suggestions
     },
 
+    async listVersions(docId) {
+      const { versions } = await requestJson<{ versions: VersionMeta[] }>(
+        'GET',
+        `/api/docs/${encodeURIComponent(docId)}/versions`,
+      )
+      return versions
+    },
+
+    async getVersionText(docId, versionId) {
+      const { text } = await requestJson<{ text: string }>(
+        'GET',
+        `/api/docs/${encodeURIComponent(docId)}/versions/${encodeURIComponent(versionId)}`,
+      )
+      return normalizeEol(text)
+    },
+
     createVersion(docId, name) {
       return requestJson<VersionMeta>('POST', `/api/docs/${encodeURIComponent(docId)}/versions`, { name })
     },
@@ -356,12 +388,12 @@ export function createApi(opts: ApiOptions): Api {
       return assets
     },
 
-    downloadDocAsset(docId, filename) {
-      return downloadBinary(`/api/docs/${encodeURIComponent(docId)}/assets/${encodeURIComponent(filename)}`)
+    downloadDocAsset(docId, filename, versionId) {
+      return downloadBinary(assetFilePath('docs', docId, filename, versionId))
     },
 
-    downloadFolderAsset(folderId, filename) {
-      return downloadBinary(`/api/folders/${encodeURIComponent(folderId)}/assets/${encodeURIComponent(filename)}`)
+    downloadFolderAsset(folderId, filename, versionId) {
+      return downloadBinary(assetFilePath('folders', folderId, filename, versionId))
     },
 
     uploadDocAsset(docId, filename, data, contentType, overwrite = false) {
@@ -371,6 +403,107 @@ export function createApi(opts: ApiOptions): Api {
     uploadFolderAsset(folderId, filename, data, contentType, overwrite = false) {
       return uploadAsset(`/api/folders/${encodeURIComponent(folderId)}/assets`, filename, data, contentType, overwrite)
     },
+
+    async listDocAssetComments(docId, filename) {
+      const { comments } = await requestJson<{ comments: Comment[] }>(
+        'GET',
+        assetCommentsPath('docs', docId, filename),
+      )
+      return comments
+    },
+
+    async listFolderAssetComments(folderId, filename) {
+      const { comments } = await requestJson<{ comments: Comment[] }>(
+        'GET',
+        assetCommentsPath('folders', folderId, filename),
+      )
+      return comments
+    },
+
+    createDocAssetComment(docId, filename, input) {
+      return requestJson<Comment>('POST', assetCommentsPath('docs', docId, filename), input)
+    },
+
+    createFolderAssetComment(folderId, filename, input) {
+      return requestJson<Comment>('POST', assetCommentsPath('folders', folderId, filename), input)
+    },
+
+    replyToDocAssetComment(docId, filename, commentId, body) {
+      return requestJson<CommentReply>(
+        'POST',
+        assetCommentsPath('docs', docId, filename, `/${encodeURIComponent(commentId)}/replies`),
+        { body },
+      )
+    },
+
+    replyToFolderAssetComment(folderId, filename, commentId, body) {
+      return requestJson<CommentReply>(
+        'POST',
+        assetCommentsPath('folders', folderId, filename, `/${encodeURIComponent(commentId)}/replies`),
+        { body },
+      )
+    },
+
+    async resolveDocAssetComment(docId, filename, commentId, resolved = true) {
+      await requestJson<unknown>(
+        'POST',
+        assetCommentsPath('docs', docId, filename, `/${encodeURIComponent(commentId)}/resolve`),
+        { resolved },
+      )
+    },
+
+    async resolveFolderAssetComment(folderId, filename, commentId, resolved = true) {
+      await requestJson<unknown>(
+        'POST',
+        assetCommentsPath('folders', folderId, filename, `/${encodeURIComponent(commentId)}/resolve`),
+        { resolved },
+      )
+    },
+
+    async listDocAssetVersions(docId, filename) {
+      const { versions } = await requestJson<{ versions: AssetVersionMeta[] }>(
+        'GET',
+        assetVersionsPath('docs', docId, filename),
+      )
+      return versions
+    },
+
+    async listFolderAssetVersions(folderId, filename) {
+      const { versions } = await requestJson<{ versions: AssetVersionMeta[] }>(
+        'GET',
+        assetVersionsPath('folders', folderId, filename),
+      )
+      return versions
+    },
+
+    nameDocAssetVersion(docId, filename, versionId, name) {
+      return requestJson<AssetVersionMeta>(
+        'POST',
+        assetVersionsPath('docs', docId, filename, `/${encodeURIComponent(versionId)}/name`),
+        { name },
+      )
+    },
+
+    nameFolderAssetVersion(folderId, filename, versionId, name) {
+      return requestJson<AssetVersionMeta>(
+        'POST',
+        assetVersionsPath('folders', folderId, filename, `/${encodeURIComponent(versionId)}/name`),
+        { name },
+      )
+    },
+  }
+
+  function assetFilePath(scope: 'docs' | 'folders', id: string, filename: string, versionId?: string): string {
+    const path = `/api/${scope}/${encodeURIComponent(id)}/assets/${encodeURIComponent(filename)}`
+    return versionId === undefined ? path : `${path}?version=${encodeURIComponent(versionId)}`
+  }
+
+  function assetCommentsPath(scope: 'docs' | 'folders', id: string, filename: string, sub = ''): string {
+    return `/api/${scope}/${encodeURIComponent(id)}/assets/${encodeURIComponent(filename)}/comments${sub}`
+  }
+
+  function assetVersionsPath(scope: 'docs' | 'folders', id: string, filename: string, sub = ''): string {
+    return `/api/${scope}/${encodeURIComponent(id)}/assets/${encodeURIComponent(filename)}/versions${sub}`
   }
 
   async function uploadAsset(

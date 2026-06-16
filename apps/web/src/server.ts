@@ -14,7 +14,7 @@ import { handleApi } from './api/router.ts'
 import { captureServerException } from './analytics-server.ts'
 
 // The Durable Object classes must be exported from the Worker's main module.
-export { DocDO, SearchDO } from '@glyphdown/sync'
+export { DocDO, HtmlDocDO, SearchDO } from '@glyphdown/sync'
 
 const startFetch: RequestHandler<Register> = createStartHandler(defaultStreamHandler)
 

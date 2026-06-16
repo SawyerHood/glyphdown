@@ -24,7 +24,7 @@ Resolution order: `GLYPHDOWN_API_KEY` env → `GLYPHDOWN_SERVER` env → the con
 | `glyphdown logout` | remove stored credentials (revokes the session server-side when possible) |
 | `glyphdown list [--json]` | docs you can access: id, your role, title |
 | `glyphdown vaults [--json]` | vaults you own or that are shared with you: id, your role, name |
-| `glyphdown cat <doc> [--clean] [--json]` | print a doc to stdout (`--clean` strips pending suggested insertions) |
+| `glyphdown cat <target> [--clean \| --version <id>] [--folder <folderRef> \| --doc <doc>] [--json]` | print a doc or HTML asset; asset refs are URLs or filename + scope |
 | `glyphdown new <name> [--folder <folderId> \| --vault <vault>] [--json]` | create a doc (name slugified into `<slug>.md`); prints id + URL. Neither flag → your default vault |
 | `glyphdown mv <file> <new-name>` | rename a tracked doc: local file AND server filename together |
 | `glyphdown rm <file> [--force]` / `glyphdown delete <file> [--force]` | delete a tracked doc on the server, archive the local file, and remove local tracking metadata |
@@ -32,14 +32,15 @@ Resolution order: `GLYPHDOWN_API_KEY` env → `GLYPHDOWN_SERVER` env → the con
 | `glyphdown pull [doc] [path] [--clean] [--folder <folderRef>]` | pull one doc — or a whole folder by id/exact name (vault names/ids work: a vault IS a folder) |
 | `glyphdown push [path] [--all] [--suggest] [--force] [-m <note>]` | merge local file edits into the live doc through the CRDT |
 | `glyphdown sync [dir] [--force] [--json]` | two-way mirror sync of the whole workspace |
-| `glyphdown comments <doc> [--json]` | list open comment threads with anchor quotes |
-| `glyphdown comment <doc> --body <b> [--reply <id>] [--resolve <id>] [--line <n>]` | add / reply / resolve comments |
+| `glyphdown history <target> [--folder <folderRef> \| --doc <doc>] [--json]` | list doc versions or HTML asset versions |
+| `glyphdown comments <target> [--folder <folderRef> \| --doc <doc>] [--json]` | list open doc or HTML asset comment threads |
+| `glyphdown comment <target> --body <b> [--reply <id>] [--resolve <id>] [--line <n>] [--folder <folderRef> \| --doc <doc>]` | add / reply / resolve doc or HTML asset comments |
 | `glyphdown suggestions <doc> [--json]` | list open suggestions with their +/− parts |
 | `glyphdown share <doc> [--role <r>] [--json]` | create an anyone-with-link share link (default role: viewer); prints the URL |
 | `glyphdown share list <doc> [--json]` | active share links for a doc, with URLs |
 | `glyphdown share revoke <doc> <token> [--json]` | revoke a share link (a `?share=<token>` URL needs no separate token) |
 | `glyphdown share [list\|revoke] --folder <folderRef> …` | same three, for a folder/vault (the link covers its whole subtree) |
-| `glyphdown snapshot <doc> -m <msg>` | create a named version (do this before big pushes) |
+| `glyphdown snapshot <target> -m <msg> [--folder <folderRef> \| --doc <doc>]` | create a named doc version, or name the current HTML asset version |
 
 ## Vaults
 
@@ -201,6 +202,8 @@ glyphdown push plan.md --suggest -m "tightened the intro"
 glyphdown suggestions <doc> --json   # [{id, authorName, note?, status, parts: [{kind: insert|delete, anchor…}]}]
 glyphdown cat <doc>                  # working view: pending suggested insertions included
 glyphdown cat <doc> --clean          # "reject all" view; also: glyphdown pull <doc> --clean
+glyphdown history <doc> --json       # saved versions
+glyphdown cat <doc> --version <id>   # read a saved version
 ```
 
 `-m/--message` on a suggest push is shown as the suggestion's note — always say why.
@@ -213,9 +216,13 @@ glyphdown comment <doc> --body "Should this ship?"       # doc-level thread
 glyphdown comment <doc> --line 12 --body "typo here"     # anchored to line 12 (1-based, current working text)
 glyphdown comment <doc> --reply c42 --body "fixed in the last push"
 glyphdown comment <doc> --resolve c42                    # resolve; add --body to reply first, then resolve
+glyphdown comments "https://server/f/<folderId>/file/page.html" --json
+glyphdown comment page.html --folder <folderId> --body "Check this HTML file"  # asset-level thread
+glyphdown comment page.html --folder <folderId> --reply c42 --body "fixed"
 ```
 
 - `comments` shows open threads only; anchored threads quote their text, `[orphaned]` marks anchors whose text was edited away.
+- CLI-created HTML asset comments are file-level. Node/element picking happens in the web viewer; the CLI can list, reply, and resolve those threads after they exist.
 - Comment bodies are markdown; @-mention as `@[userId]`.
 - Good etiquette: when a comment asks for a change, make the edit (push or suggest), then `--reply` with what you did and `--resolve`.
 
@@ -250,6 +257,8 @@ glyphdown share revoke --folder Research <token>     # revoke — the token is t
 - Syncable asset files are images (`png, jpg, jpeg, gif, webp, svg, avif`) and standalone HTML files (`html, htm`) — max **10 MB**. Everything else (and all dotfiles) is ignored, noted once per sync.
 - Reference images **folder-relative** in markdown: the file sits next to the doc, embed as `![alt](diagram.png)`. All docs in a folder share one asset namespace; folderless docs each carry their own.
 - HTML files in folder workspaces upload as folder assets and sync prints the viewer URL (`<server>/f/<folderId>/file/<filename>`) when it uploads one.
+- Asset refs accepted by `cat`, `history`, `comments`, `comment`, and `snapshot` are either the viewer URL (`https://server/f/<folderId>/file/<filename>`), an API asset URL, or a filename plus `--folder <folderRef>` / `--doc <docId>`.
+- HTML asset uploads create version rows automatically. Use `glyphdown history <asset>` to list them, `glyphdown cat <asset> --version <id>` to read one, and `glyphdown snapshot <asset> -m "label"` to name the current asset version.
 - Filenames are normalized server-side (basename only, lowercase, whitespace → `-`); the CLI records the server's name if it differs.
 - Conflict rule: an asset changed both locally and on the server keeps the **local** copy with a warning (`conflict-local-kept`) — assets don't merge.
 - No delete propagation: a deleted local asset re-downloads on the next sync.
@@ -260,7 +269,7 @@ glyphdown share revoke --folder Research <token>     # revoke — the token is t
 - **One sync at a time per workspace.** The CLI already processes docs sequentially (rate limits, readable output); don't run parallel syncs/pushes over the same tree.
 - Rate limit: **60 pushes/min per identity**. `push --all` and `sync` pace themselves by being sequential; on `rate-limited` honor the printed retry delay.
 - Prefer many **small, surgical pushes** over one giant rewrite — character-level diffs preserve everyone's comment/suggestion anchors in the runs you didn't touch.
-- `glyphdown snapshot <doc> -m "..."` before any bulk transformation, so humans have a named restore point.
+- `glyphdown snapshot <doc-or-html-asset> -m "..."` before any bulk transformation, so humans have a named restore point/version label.
 - On docs humans are actively editing, prefer `--suggest` for opinionated rewrites.
 
 ## Troubleshooting
@@ -281,10 +290,11 @@ glyphdown share revoke --folder Research <token>     # revoke — the token is t
 
 - `glyphdown list --json` → `[{id, filename, title, folderId, ownerUserId, role, createdAt, updatedAt}]`
 - `glyphdown vaults --json` → `[{id, name, ownerUserId, role, createdAt}]`
-- `glyphdown cat <doc> --json` → `{docId, view, text, versionId}`
+- `glyphdown cat <doc> --json` → `{docId, view, text, versionId}`; `glyphdown cat <asset> --json` → `{target:'asset', scope, id, filename, versionId, contentType, etag, text}`
 - `glyphdown new <name> --json` → the doc meta plus `url`
 - `glyphdown sync --json` → `[{docId, file, action, failedHunks?, message?}]` — one record per doc AND per folder action (folder actions use the folder id as `docId` and `dir/` as `file`). Asset outcomes ride stderr/human output, not the JSON.
-- `glyphdown comments <doc> --json` → open `Comment[]` (anchor quotes, replies, reactions)
+- `glyphdown history <target> --json` → doc `VersionMeta[]` or asset `AssetVersionMeta[]`
+- `glyphdown comments <target> --json` → open `Comment[]` (anchor quotes/node labels, replies, reactions)
 - `glyphdown suggestions <doc> --json` → open `SuggestionRecord[]` (insert/delete parts with anchors)
 - `glyphdown share … --json` → create: `{target: 'doc'|'folder', id, token, role, createdAt, url}`; list: `[{token, role, createdAt, url}]`; revoke: `{ok: true, target, id, token}`
 
