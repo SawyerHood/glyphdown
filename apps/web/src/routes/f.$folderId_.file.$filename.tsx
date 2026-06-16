@@ -413,6 +413,7 @@ export function HtmlAssetViewerChrome({
       service={service}
       report={report}
       emptyHint={canComment ? 'Pick an element in the HTML file to add an anchored comment.' : 'Sign in with comment access to join the discussion.'}
+      anchoredLabel="On elements"
       documentLabel="File"
       documentActionLabel="Comment on the HTML file"
       documentPlaceholder="Comment on the whole HTML file…"
