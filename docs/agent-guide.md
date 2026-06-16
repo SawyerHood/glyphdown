@@ -40,6 +40,7 @@ Resolution order: `GLYPHDOWN_API_KEY` env → `GLYPHDOWN_SERVER` env → the con
 | `glyphdown share list <doc> [--json]` | active share links for a doc, with URLs |
 | `glyphdown share revoke <doc> <token> [--json]` | revoke a share link (a `?share=<token>` URL needs no separate token) |
 | `glyphdown share [list\|revoke] --folder <folderRef> …` | same three, for a folder/vault (the link covers its whole subtree) |
+| `glyphdown share <asset> [list\|revoke] [--folder <folderRef>] …` | per-file HTML asset links (folder-scoped, view/comment only); target by viewer URL or filename + `--folder` |
 | `glyphdown snapshot <target> -m <msg> [--folder <folderRef> \| --doc <doc>]` | create a named doc version, or name the current HTML asset version |
 
 ## Vaults
@@ -248,6 +249,16 @@ glyphdown share revoke "https://glyphdown.com/d/<docId>?share=<token>"   # token
 glyphdown share --folder Research --role commenter   # create
 glyphdown share list --folder Research --json        # list
 glyphdown share revoke --folder Research <token>     # revoke — the token is the only positional
+```
+
+- **Per-file HTML assets** can be shared on their own — the same per-file link the web file viewer mints. These are **folder/vault assets only** and **view/comment only** (`suggester`/`editor` are rejected up front; a static file has no suggest/edit surface). The recipient lands on the file viewer: `https://<server>/f/<folderId>/file/<filename>?share=<token>`. Target the asset by its viewer URL or by filename + `--folder` (exactly as `comments`/`history` do — a bare `--folder <ref>` without a filename still shares the whole folder):
+
+```sh
+glyphdown share https://glyphdown.com/f/f1/file/page.html --role commenter  # create (default role: viewer)
+glyphdown share page.html --folder Research                                 # create by filename
+glyphdown share list page.html --folder Research --json                     # list per-file links
+glyphdown share revoke --folder Research page.html <token>                  # revoke — filename THEN token
+glyphdown share revoke "https://glyphdown.com/f/f1/file/page.html?share=<token>"  # token read from the URL
 ```
 
 - The token IS the capability — treat it like a secret; don't paste share URLs into public places unless that's the point. Revoking kills anonymous access immediately (signed-in sessions that rode the link drop at their next request).
