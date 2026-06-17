@@ -763,4 +763,137 @@ describe('handleFolderAssets', () => {
     const res = await folderUpload(db, bucket, 'pic.png', { auth: authWithRole('suggester') })
     expect(res.status).toBe(403)
   })
+
+  it('upload responses carry the folderId so callers can build the viewer URL', async () => {
+    const db = setupDb()
+    const { bucket } = fakeBucket()
+    const body = (await (await folderUpload(db, bucket, 'pic.png')).json()) as UploadAssetResponse
+    expect(body.folderId).toBe(folderId)
+    expect(body.docId).toBeNull()
+  })
+})
+
+describe('asset rename', () => {
+  const folderId = 'folder-1'
+  const renameReq = (
+    db: Db,
+    bucket: R2Bucket,
+    filename: string,
+    to: unknown,
+    role: AuthContext['role'] | null = 'editor',
+  ) => {
+    const sub = `/assets/${encodeURIComponent(filename)}/rename`
+    const url = new URL(`https://x/api/folders/${folderId}${sub}`)
+    const request = new Request(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ to }),
+    })
+    return handleFolderAssets(db, bucket, request, url, folderId, sub, role === null ? null : { ...editorAuth, role })
+  }
+
+  it('renames in place, preserving the asset id, its versions, and updating the r2 key', async () => {
+    const db = setupDb()
+    const { bucket } = fakeBucket()
+    await upload(db, bucket, folderedDoc, 'old.png')
+    const beforeId = rawDb(db).prepare(`SELECT id FROM assets WHERE filename='old.png'`).pluck().get() as string
+
+    const res = await renameReq(db, bucket, 'old.png', 'New Name.PNG')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as UploadAssetResponse
+    expect(body.asset.filename).toBe('new-name.png')
+    expect(body.folderId).toBe(folderId)
+
+    const after = rawDb(db).prepare(`SELECT id, r2_key FROM assets WHERE filename='new-name.png'`).get() as {
+      id: string
+      r2_key: string
+    }
+    expect(after.id).toBe(beforeId) // same id ⇒ comments, versions, share links survive
+    expect(after.r2_key).toBe('folder/folder-1/new-name.png')
+    expect(rawDb(db).prepare(`SELECT COUNT(*) FROM assets WHERE filename='old.png'`).pluck().get()).toBe(0)
+    expect(rawDb(db).prepare(`SELECT COUNT(*) FROM asset_versions WHERE asset_id=?`).pluck().get(beforeId)).toBe(1)
+  })
+
+  it('409s on a name collision in the same namespace', async () => {
+    const db = setupDb()
+    const { bucket } = fakeBucket()
+    await upload(db, bucket, folderedDoc, 'a.png')
+    await upload(db, bucket, folderedDoc, 'b.png')
+    const res = await renameReq(db, bucket, 'a.png', 'b.png')
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as { error: string }).error).toBe('filename-taken')
+  })
+
+  it('treats a rename to the same name as a no-op', async () => {
+    const db = setupDb()
+    const { bucket } = fakeBucket()
+    await upload(db, bucket, folderedDoc, 'pic.png')
+    const res = await renameReq(db, bucket, 'pic.png', 'pic.png')
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as UploadAssetResponse).asset.filename).toBe('pic.png')
+  })
+
+  it('404s for a missing asset and 400s for a bad target name', async () => {
+    const db = setupDb()
+    const { bucket } = fakeBucket()
+    expect((await renameReq(db, bucket, 'missing.png', 'x.png')).status).toBe(404)
+    await upload(db, bucket, folderedDoc, 'pic.png')
+    expect((await renameReq(db, bucket, 'pic.png', '...')).status).toBe(400)
+    expect((await renameReq(db, bucket, 'pic.png', 42)).status).toBe(400)
+  })
+
+  it('rejects renames below editor', async () => {
+    const db = setupDb()
+    const { bucket } = fakeBucket()
+    await upload(db, bucket, folderedDoc, 'pic.png')
+    expect((await renameReq(db, bucket, 'pic.png', 'x.png', 'viewer')).status).toBe(403)
+    expect((await renameReq(db, bucket, 'pic.png', 'x.png', null)).status).toBe(403)
+  })
+
+  it('409s when renaming a legacy doc-scoped asset onto an existing folder-scoped name (no silent strand)', async () => {
+    const db = setupDb()
+    const { bucket } = fakeBucket()
+    // doc-1 lives in folder-1, so its legacy doc-scoped rows resolve via the folder fallback.
+    rawDb(db)
+      .prepare(
+        `INSERT INTO docs (id, title, filename, folder_id, owner_user_id, created_at, updated_at, deleted_at)
+         VALUES ('doc-1', 'd', 'd.md', 'folder-1', 'owner-1', 1, 1, NULL)`,
+      )
+      .run()
+    const legacyKey = 'doc/doc-1/legacy.png'
+    await bucket.put(legacyKey, PNG.buffer.slice(0) as ArrayBuffer)
+    rawDb(db)
+      .prepare(
+        `INSERT INTO assets (id, folder_id, doc_id, filename, r2_key, content_type, size, etag, current_version_id, created_by, created_at)
+         VALUES ('leg-1', NULL, 'doc-1', 'legacy.png', ?, 'image/png', ?, 'e', NULL, 'owner-1', 1)`,
+      )
+      .run(legacyKey, PNG.byteLength)
+    // A folder-scoped row already holds the target name.
+    await upload(db, bucket, folderedDoc, 'target.png')
+
+    const res = await renameReq(db, bucket, 'legacy.png', 'target.png')
+    expect(res.status).toBe(409)
+    // The legacy row is untouched (not stranded behind the folder row).
+    expect(rawDb(db).prepare(`SELECT filename FROM assets WHERE id='leg-1'`).pluck().get()).toBe('legacy.png')
+  })
+
+  it('moves legacy bytes stored at r2_key when present', async () => {
+    const db = setupDb()
+    const { bucket, objects } = fakeBucket()
+    // A legacy row: bytes live at r2_key (no current_version_id / content blob).
+    const legacyKey = assetR2Key({ kind: 'folder', id: folderId }, 'legacy.png')
+    await bucket.put(legacyKey, PNG.buffer.slice(0) as ArrayBuffer)
+    rawDb(db)
+      .prepare(
+        `INSERT INTO assets (id, folder_id, doc_id, filename, r2_key, content_type, size, etag, current_version_id, created_by, created_at)
+         VALUES ('legacy-1', ?, NULL, 'legacy.png', ?, 'image/png', ?, 'etag-legacy', NULL, 'owner-1', 1)`,
+      )
+      .run(folderId, legacyKey, PNG.byteLength)
+
+    const res = await renameReq(db, bucket, 'legacy.png', 'moved.png')
+    expect(res.status).toBe(200)
+    expect(objects.has('folder/folder-1/moved.png')).toBe(true)
+    expect(objects.has(legacyKey)).toBe(false)
+    expect(rawDb(db).prepare(`SELECT r2_key FROM assets WHERE id='legacy-1'`).pluck().get()).toBe('folder/folder-1/moved.png')
+  })
 })

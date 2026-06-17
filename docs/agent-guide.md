@@ -22,12 +22,14 @@ Resolution order: `GLYPHDOWN_API_KEY` env → `GLYPHDOWN_SERVER` env → the con
 |---|---|
 | `glyphdown login [--key <key>] [--server <url>]` | store an API key (agents) or device-code sign-in (humans) |
 | `glyphdown logout` | remove stored credentials (revokes the session server-side when possible) |
-| `glyphdown list [--json]` | docs you can access: id, your role, title |
+| `glyphdown list [--folder <folderRef>] [--json]` | docs you can access (id, role, title); with `--folder`, the docs AND files (assets) in that one folder/vault. Alias: `glyphdown ls` |
 | `glyphdown vaults [--json]` | vaults you own or that are shared with you: id, your role, name |
 | `glyphdown cat <target> [--clean \| --version <id>] [--folder <folderRef> \| --doc <doc>] [--json]` | print a doc or HTML asset; asset refs are URLs or filename + scope |
-| `glyphdown new <name> [--folder <folderId> \| --vault <vault>] [--json]` | create a doc (name slugified into `<slug>.md`); prints id + URL. Neither flag → your default vault |
-| `glyphdown mv <file> <new-name>` | rename a tracked doc: local file AND server filename together |
-| `glyphdown rm <file> [--force]` / `glyphdown delete <file> [--force]` | delete a tracked doc on the server, archive the local file, and remove local tracking metadata |
+| `glyphdown add <file> [--folder <folderRef> \| --vault <vault> \| --doc <doc>] [--name <n>] [--overwrite] [--share [role]] [-m <note>] [--json]` | add a local file: a `.md` becomes a doc, an image/`.html` becomes a file (asset). Neither scope flag → your default vault. Prints the URL |
+| `glyphdown new <name> [--folder <folderId> \| --vault <vault>] [--json]` | create an EMPTY doc (name slugified into `<slug>.md`); prints id + URL. Neither flag → your default vault. To create WITH content, use `add` |
+| `glyphdown url <target> [--folder <folderRef> \| --doc <doc>] [--json]` | print the URL for a doc (by id/URL) or a file (by filename + scope, or an asset URL) — idempotent, no upload |
+| `glyphdown mv <file> <new-name> [--folder <folderRef> \| --doc <doc>] [--json]` | rename a tracked doc OR a file (asset): local file AND server name together. A renamed file keeps its comments and version history (its share-link token survives, but the URL carries the new name) |
+| `glyphdown rm <file> [--force] [--folder <folderRef> \| --doc <doc>] [--json]` / `glyphdown delete …` | delete a tracked doc OR a file (asset) on the server, archive the local copy, and remove local tracking |
 | `glyphdown clone [dir] [--vault <vault>]` | mirror every accessible folder/doc — or one vault's subtree — into a workspace (default `./glyphdown`, or `./<vault-slug>` with `--vault`) |
 | `glyphdown pull [doc] [path] [--clean] [--folder <folderRef>]` | pull one doc — or a whole folder by id/exact name (vault names/ids work: a vault IS a folder) |
 | `glyphdown push [path] [--all] [--suggest] [--force] [-m <note>]` | merge local file edits into the live doc through the CRDT |
@@ -263,16 +265,33 @@ glyphdown share revoke "https://glyphdown.com/f/f1/file/page.html?share=<token>"
 
 - The token IS the capability — treat it like a secret; don't paste share URLs into public places unless that's the point. Revoking kills anonymous access immediately (signed-in sessions that rode the link drop at their next request).
 
-## Assets
+## Files (assets) — same verbs as docs
 
-- Syncable asset files are images (`png, jpg, jpeg, gif, webp, svg, avif`) and standalone HTML files (`html, htm`) — max **10 MB**. Everything else (and all dotfiles) is ignored, noted once per sync.
-- Reference images **folder-relative** in markdown: the file sits next to the doc, embed as `![alt](diagram.png)`. All docs in a folder share one asset namespace; folderless docs each carry their own.
-- HTML files in folder workspaces upload as folder assets and sync prints the viewer URL (`<server>/f/<folderId>/file/<filename>`) when it uploads one.
-- Asset refs accepted by `cat`, `history`, `comments`, `comment`, and `snapshot` are either the viewer URL (`https://server/f/<folderId>/file/<filename>`), an API asset URL, or a filename plus `--folder <folderRef>` / `--doc <docId>`.
-- HTML asset uploads create version rows automatically. Use `glyphdown history <asset>` to list them, `glyphdown cat <asset> --version <id>` to read one, and `glyphdown snapshot <asset> -m "label"` to name the current asset version.
+Glyphdown treats docs and other files (images, standalone HTML) the same at the CLI surface: the verbs below dispatch by file type. A `.md` is a doc (a collaborative CRDT — edit + push merges); an image/`.html` is a **file** (an opaque blob — last-write-wins, no merge). The mental model is one filesystem: "everything in a folder is a file, addressed by its filename."
+
+```sh
+glyphdown add report.html                      # upload one file → prints its viewer URL (lands in your default vault; no clone needed)
+glyphdown add chart.png --folder Research      # upload into a named folder/vault
+glyphdown add notes.md                          # a .md is created as a DOC, with the file's content, in one step
+glyphdown add page.html --share                 # also mint a per-file share link (folder/vault files only)
+glyphdown ls --folder Research --json           # list the docs AND files in one folder
+glyphdown url page.html --folder Research        # print a file's URL anytime, idempotently (no re-upload)
+glyphdown cat page.html --folder Research         # print a file's contents
+glyphdown mv old.png new.png                     # rename a file (server + local); keeps its comments, versions, share links
+glyphdown rm page.html                           # delete a file (server) + archive the local copy
+```
+
+- Syncable file types: images (`png, jpg, jpeg, gif, webp, svg, avif`) and standalone HTML (`html, htm`) — max **10 MB**. `add` rejects anything else; `sync` ignores it (and dotfiles), noted once per run.
+- **Scope is optional.** Like `new`, `add` with no `--folder`/`--vault`/`--doc` lands the file in your default vault (server `POST /api/assets`). Pass `--folder`/`--vault` to target one; `--doc` targets a doc's legacy asset namespace (assets only).
+- `mv`/`rm`/`url`/`cat` find a file's scope from an explicit `--folder`/`--doc`, else from the folder workspace the local file sits in (`.glyphdown/folder.json`). Outside a workspace, pass a scope flag.
+- **Rename preserves identity.** `mv old.html new.html` keeps the file's id, so its comment thread, version history, and share links survive. (Existing share-link URLs carry the old filename — re-fetch one with `glyphdown url`/`share list` after a rename.)
+- **By-name caveat:** a doc and a file may share a name in one folder (the server keys files by content-type, not extension). `add`/`mv`/`rm` operate on a real local file so they dispatch safely by extension; for `cat`/`url`/`share`/`comments`/`history` on a file, address it explicitly (filename + `--folder`/`--doc`, or a viewer URL) to avoid ambiguity with a same-named doc.
+- Reference images **folder-relative** in markdown — embed as `![alt](diagram.png)`. All docs in a folder share one file namespace; folderless docs each carry their own.
+- Files carry version rows automatically. `glyphdown history <file>` lists them, `glyphdown cat <file> --version <id>` reads one, `glyphdown snapshot <file> -m "label"` names the current version.
+- Asset refs accepted by `cat`, `url`, `history`, `comments`, `comment`, and `snapshot`: the viewer URL (`https://server/f/<folderId>/file/<filename>`), an API asset URL, or a filename plus `--folder <folderRef>` / `--doc <docId>`.
 - Filenames are normalized server-side (basename only, lowercase, whitespace → `-`); the CLI records the server's name if it differs.
-- Conflict rule: an asset changed both locally and on the server keeps the **local** copy with a warning (`conflict-local-kept`) — assets don't merge.
-- No delete propagation: a deleted local asset re-downloads on the next sync.
+- Conflict rule: a file changed both locally and on the server keeps the **local** copy with a warning (`conflict-local-kept`) — files don't merge.
+- No delete propagation on sync: a deleted local file re-downloads next sync. Use `glyphdown rm <file>` for an intentional server delete.
 
 ## Multi-agent / shared-doc etiquette
 
@@ -299,10 +318,13 @@ glyphdown share revoke "https://glyphdown.com/f/f1/file/page.html?share=<token>"
 
 ## JSON output shapes
 
-- `glyphdown list --json` → `[{id, filename, title, folderId, ownerUserId, role, createdAt, updatedAt}]`
+- `glyphdown list --json` → `[{id, filename, title, folderId, ownerUserId, role, createdAt, updatedAt}]`; `glyphdown list --folder <ref> --json` → `{folder:{id,name}, docs:DocMeta[], assets:AssetMeta[]}`
 - `glyphdown vaults --json` → `[{id, name, ownerUserId, role, createdAt}]`
 - `glyphdown cat <doc> --json` → `{docId, view, text, versionId}`; `glyphdown cat <asset> --json` → `{target:'asset', scope, id, filename, versionId, contentType, etag, text}`
+- `glyphdown add <file.md> --json` → the doc meta plus `{url, pushed, pushError?}`; `glyphdown add <asset> --json` → `{target:'asset', scope, folderId, docId, filename, url, share?}`
 - `glyphdown new <name> --json` → the doc meta plus `url`
+- `glyphdown url <target> --json` → `{target:'doc', docId, url}` or `{target:'asset', scope, id, filename, url}`
+- `glyphdown mv <file> <new> --json` / `glyphdown rm <file> --json` → `{target:'doc'|'asset', …, action:'renamed'|'deleted'}`
 - `glyphdown sync --json` → `[{docId, file, action, failedHunks?, message?}]` — one record per doc AND per folder action (folder actions use the folder id as `docId` and `dir/` as `file`). Asset outcomes ride stderr/human output, not the JSON.
 - `glyphdown history <target> --json` → doc `VersionMeta[]` or asset `AssetVersionMeta[]`
 - `glyphdown comments <target> --json` → open `Comment[]` (anchor quotes/node labels, replies, reactions)

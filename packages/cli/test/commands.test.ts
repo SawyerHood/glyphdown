@@ -1,10 +1,10 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { AssetVersionMeta, Comment, DocMeta, PushResponse, ShareLinkRole, VersionMeta } from '@glyphdown/protocol'
+import type { AssetMeta, AssetVersionMeta, Comment, DocMeta, PushResponse, ShareLinkRole, VersionMeta } from '@glyphdown/protocol'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Api } from '../src/index.ts'
-import { CliError, createProgram, sha256Hex, writePull } from '../src/index.ts'
+import type { Api, FolderMeta } from '../src/index.ts'
+import { CliError, createProgram, readAssetState, sha256Hex, writeAssetState, writeFolderConfig, writePull } from '../src/index.ts'
 
 const dirs: string[] = []
 function tmp(): string {
@@ -86,6 +86,11 @@ function fakeApi(overrides: Partial<Api> = {}): Api {
     downloadFolderAsset: vi.fn(async () => ({ data: new Uint8Array(), etag: null, contentType: null })),
     uploadDocAsset: vi.fn(),
     uploadFolderAsset: vi.fn(),
+    uploadAsset: vi.fn(),
+    renameFolderAsset: vi.fn(),
+    renameDocAsset: vi.fn(),
+    deleteFolderAsset: vi.fn(async () => undefined),
+    deleteDocAsset: vi.fn(async () => undefined),
     listDocAssetComments: vi.fn(async () => []),
     listFolderAssetComments: vi.fn(async () => []),
     createDocAssetComment: vi.fn(),
@@ -756,5 +761,200 @@ describe('ink snapshot', () => {
     expect(api.listFolderAssetVersions).toHaveBeenCalledWith('f1', 'page.html')
     expect(api.nameFolderAssetVersion).toHaveBeenCalledWith('f1', 'page.html', 'av1', 'baseline')
     expect(h.lines.join('\n')).toContain('av1')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Unified file surface: add / url / ls / rm / mv treat docs and assets alike.
+// ---------------------------------------------------------------------------
+
+function assetMetaOf(filename: string, contentType = 'text/html'): AssetMeta {
+  return { id: `asset-${filename}`, filename, contentType, size: 11, etag: 'etag-1', createdBy: 'u1', createdAt: 9 }
+}
+
+function folderMetaOf(id: string, name: string): FolderMeta {
+  return { id, name, kind: 'folder', parentId: null, ownerUserId: 'u1', role: 'editor', createdAt: 1 }
+}
+
+describe('glyphdown add', () => {
+  it('uploads a single asset to the default vault and prints its viewer URL — no clone, no folder', async () => {
+    const dir = tmp()
+    writeFileSync(join(dir, 'report.html'), '<h1>hi</h1>')
+    const uploadAsset = vi.fn(async () => ({ asset: assetMetaOf('report.html'), path: 'report.html', folderId: 'vault1', docId: null }))
+    const h = harness(dir, fakeApi({ uploadAsset }))
+
+    await h.run(['add', 'report.html'])
+
+    expect(uploadAsset).toHaveBeenCalledWith('report.html', expect.any(Uint8Array), 'text/html', false)
+    expect(h.lines[0]).toBe('https://ink.example/f/vault1/file/report.html')
+  })
+
+  it('uploads to a named folder when --folder is given', async () => {
+    const dir = tmp()
+    writeFileSync(join(dir, 'chart.png'), Buffer.from([1, 2, 3]))
+    const uploadFolderAsset = vi.fn(async () => ({ asset: assetMetaOf('chart.png', 'image/png'), path: 'chart.png', folderId: 'f1', docId: null }))
+    const h = harness(dir, fakeApi({ uploadFolderAsset, listFolders: vi.fn(async () => [folderMetaOf('f1', 'Docs')]) }))
+
+    await h.run(['add', 'chart.png', '--folder', 'f1', '--json'])
+
+    expect(uploadFolderAsset).toHaveBeenCalledWith('f1', 'chart.png', expect.any(Uint8Array), 'image/png', false)
+    const out = JSON.parse(h.lines.join('\n')) as { target: string; folderId: string; url: string }
+    expect(out).toMatchObject({ target: 'asset', folderId: 'f1', url: 'https://ink.example/f/f1/file/chart.png' })
+  })
+
+  it('creates a doc from a .md file and pushes its content in one command', async () => {
+    const dir = tmp()
+    writeFileSync(join(dir, 'notes.md'), '# Notes\n\nbody\n')
+    const createDoc = vi.fn(async () => ({ ...DOC, id: 'docNew', filename: 'notes.md' }))
+    const getContent = vi.fn(async () => ({ text: '', versionId: null, baseHash: sha256Hex('') }))
+    const push = vi.fn(async (): Promise<PushResponse> => ({ ok: true, mode: 'edit', applied: 1, failedHunks: [], versionId: 'v9' }))
+    const h = harness(dir, fakeApi({ createDoc, getContent, push }))
+
+    await h.run(['add', 'notes.md', '--json'])
+
+    expect(createDoc).toHaveBeenCalledWith({ filename: 'notes.md' })
+    expect(push).toHaveBeenCalled()
+    const out = JSON.parse(h.lines.join('\n')) as { target: string; id: string; pushed: boolean }
+    expect(out).toMatchObject({ target: 'doc', id: 'docNew', pushed: true })
+  })
+
+  it('rejects an unsupported file type', async () => {
+    const dir = tmp()
+    writeFileSync(join(dir, 'data.bin'), Buffer.from([0]))
+    const h = harness(dir, fakeApi())
+    await expect(h.run(['add', 'data.bin'])).rejects.toThrow(/unsupported file type/)
+  })
+})
+
+describe('glyphdown url', () => {
+  it('prints an asset viewer URL idempotently after confirming it exists', async () => {
+    const listFolderAssets = vi.fn(async () => [assetMetaOf('page.html')])
+    const h = harness(tmp(), fakeApi({ listFolderAssets, listFolders: vi.fn(async () => [folderMetaOf('f1', 'Docs')]) }))
+
+    await h.run(['url', 'page.html', '--folder', 'f1'])
+
+    expect(listFolderAssets).toHaveBeenCalledWith('f1')
+    expect(h.lines[0]).toBe('https://ink.example/f/f1/file/page.html')
+  })
+
+  it('errors when the asset is not found in its scope', async () => {
+    const h = harness(tmp(), fakeApi({ listFolderAssets: vi.fn(async () => []), listFolders: vi.fn(async () => [folderMetaOf('f1', 'Docs')]) }))
+    await expect(h.run(['url', 'missing.html', '--folder', 'f1'])).rejects.toThrow(/no file/)
+  })
+
+  it('prints a doc URL from an id', async () => {
+    const h = harness(tmp(), fakeApi())
+    await h.run(['url', 'doc1'])
+    expect(h.lines[0]).toBe('https://ink.example/d/doc1')
+  })
+})
+
+describe('glyphdown list --folder / ls', () => {
+  it('lists docs and assets together for one folder', async () => {
+    const listDocs = vi.fn(async () => [
+      { ...DOC, id: 'd1', folderId: 'f1', title: 'launch-plan' },
+      { ...DOC, id: 'd2', folderId: 'other', title: 'elsewhere' },
+    ])
+    const listFolderAssets = vi.fn(async () => [assetMetaOf('chart.png', 'image/png'), assetMetaOf('page.html', 'text/html')])
+    const h = harness(tmp(), fakeApi({ listDocs, listFolderAssets, listFolders: vi.fn(async () => [folderMetaOf('f1', 'Docs')]) }))
+
+    await h.run(['ls', '--folder', 'f1', '--json'])
+
+    const out = JSON.parse(h.lines.join('\n')) as { docs: unknown[]; assets: unknown[] }
+    expect(out.docs).toHaveLength(1)
+    expect(out.assets).toHaveLength(2)
+  })
+})
+
+describe('glyphdown rm (asset)', () => {
+  it('deletes a folder asset, archives the local file, and clears its sync state', async () => {
+    const dir = tmp()
+    writeFolderConfig(dir, { folderId: 'f1', folderName: 'Docs', serverUrl: 'https://ink.example' })
+    writeFileSync(join(dir, 'chart.png'), Buffer.from([1, 2, 3]))
+    const deleteFolderAsset = vi.fn(async () => undefined)
+    const h = harness(dir, fakeApi({ deleteFolderAsset }))
+
+    await h.run(['rm', 'chart.png', '--json'])
+
+    expect(deleteFolderAsset).toHaveBeenCalledWith('f1', 'chart.png')
+    expect(existsSync(join(dir, 'chart.png'))).toBe(false)
+    const out = JSON.parse(h.lines.join('\n')) as { action: string; archivedPath: string }
+    expect(out.action).toBe('deleted')
+    expect(out.archivedPath).toContain(join(dir, '.glyphdown', 'trash', 'assets'))
+  })
+
+  it('errors outside a workspace without an explicit scope', async () => {
+    const dir = tmp()
+    writeFileSync(join(dir, 'chart.png'), Buffer.from([1]))
+    const h = harness(dir, fakeApi())
+    await expect(h.run(['rm', 'chart.png'])).rejects.toThrow(/not in a folder workspace/)
+  })
+})
+
+describe('glyphdown mv (asset)', () => {
+  it('renames a folder asset on the server and on disk, preserving the asset id', async () => {
+    const dir = tmp()
+    writeFolderConfig(dir, { folderId: 'f1', folderName: 'Docs', serverUrl: 'https://ink.example' })
+    writeFileSync(join(dir, 'old.html'), '<h1>x</h1>')
+    const renameFolderAsset = vi.fn(async () => ({ asset: assetMetaOf('new.html'), path: 'new.html', folderId: 'f1', docId: null }))
+    const h = harness(dir, fakeApi({ renameFolderAsset }))
+
+    await h.run(['mv', 'old.html', 'new.html'])
+
+    expect(renameFolderAsset).toHaveBeenCalledWith('f1', 'old.html', 'new.html')
+    expect(existsSync(join(dir, 'old.html'))).toBe(false)
+    expect(existsSync(join(dir, 'new.html'))).toBe(true)
+  })
+
+  it('moves the sync state entry to the new name', async () => {
+    const dir = tmp()
+    writeFolderConfig(dir, { folderId: 'f1', folderName: 'Docs', serverUrl: 'https://ink.example' })
+    writeFileSync(join(dir, 'old.html'), '<h1>x</h1>')
+    // seed a sync-state entry under the old name
+    writeAssetState(dir, { 'old.html': { etag: 'e1', size: 7, mtimeMs: 1 } })
+    const renameFolderAsset = vi.fn(async () => ({ asset: assetMetaOf('new.html'), path: 'new.html', folderId: 'f1', docId: null }))
+    const h = harness(dir, fakeApi({ renameFolderAsset }))
+
+    await h.run(['mv', 'old.html', 'new.html'])
+
+    const state = readAssetState(dir)
+    expect(state['old.html']).toBeUndefined()
+    expect(state['new.html']).toMatchObject({ etag: 'e1' })
+  })
+})
+
+describe('unified-file review fixes', () => {
+  it('add: derives an asset content-type from the SOURCE file, not a bare --name (no HTML-as-image)', async () => {
+    const dir = tmp()
+    writeFileSync(join(dir, 'report.html'), '<h1>hi</h1>')
+    const uploadAsset = vi.fn(async () => ({ asset: assetMetaOf('report.html'), path: 'report.html', folderId: 'v1', docId: null }))
+    const h = harness(dir, fakeApi({ uploadAsset }))
+
+    await h.run(['add', 'report.html', '--name', 'report']) // --name has no extension
+
+    expect(uploadAsset).toHaveBeenCalledWith('report.html', expect.any(Uint8Array), 'text/html', false)
+  })
+
+  it('add: a .md whose content push is rejected exits non-zero (no silent half-create)', async () => {
+    const dir = tmp()
+    writeFileSync(join(dir, 'notes.md'), '# Notes\n\nbody\n')
+    const createDoc = vi.fn(async () => ({ ...DOC, id: 'docX', filename: 'notes.md' }))
+    const getContent = vi.fn(async () => ({ text: '', versionId: null, baseHash: sha256Hex('') }))
+    const push = vi.fn(async () => ({ ok: false, reason: 'degenerate' }) as unknown as PushResponse)
+    const h = harness(dir, fakeApi({ createDoc, getContent, push }))
+
+    await expect(h.run(['add', 'notes.md'])).rejects.toThrow(/content not applied/)
+  })
+
+  it('mv: a doc rename honors --json', async () => {
+    const dir = tmp()
+    writePull({ targetPath: 'doc.md', docId: 'doc1', serverUrl: 'https://ink.example', text: '# t\n', versionId: 'v1' }, dir)
+    const renameDoc = vi.fn(async () => ({ ...DOC, filename: 'renamed.md' }))
+    const h = harness(dir, fakeApi({ renameDoc }))
+
+    await h.run(['mv', 'doc.md', 'renamed', '--json'])
+
+    const out = JSON.parse(h.lines.join('\n')) as { target: string; to: string; action: string }
+    expect(out).toMatchObject({ target: 'doc', to: 'renamed.md', action: 'renamed' })
   })
 })

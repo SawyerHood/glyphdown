@@ -217,7 +217,7 @@ export function folderAssetOps(
         return (await api.uploadDocAsset(legacyUploadDocId, filename, data, contentType, overwrite)).asset
       }
     },
-    ...(serverUrl !== undefined ? { viewerUrl: (filename) => fileViewerUrl(serverUrl, folderId, filename) } : {}),
+    ...(serverUrl !== undefined ? { viewerUrl: (filename) => assetViewerUrl(serverUrl, folderId, filename) } : {}),
   }
 }
 
@@ -418,7 +418,8 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function fileViewerUrl(serverUrl: string, folderId: string, filename: string): string {
+/** The web viewer URL for a folder-scoped asset: `/f/<folderId>/file/<name>`. */
+export function assetViewerUrl(serverUrl: string, folderId: string, filename: string): string {
   return `${serverUrl.replace(/\/+$/, '')}/f/${folderId}/file/${encodeURIComponent(filename)}`
 }
 

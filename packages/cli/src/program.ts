@@ -1,18 +1,32 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { normalizeEol } from '@glyphdown/core'
-import { SHARE_LINK_ROLES, type AssetVersionMeta, type Comment, type ShareLinkRole, type VersionMeta } from '@glyphdown/protocol'
+import {
+  SHARE_LINK_ROLES,
+  SYNCABLE_ASSET_FILE_EXTENSIONS,
+  type AssetVersionMeta,
+  type Comment,
+  type ShareLinkRole,
+  type UploadAssetResponse,
+  type VersionMeta,
+  assetKindForContentType,
+  normalizeAssetFilename,
+} from '@glyphdown/protocol'
 import { Command, CommanderError } from 'commander'
 import pc from 'picocolors'
 import { type Api, createApi, pushWithBase } from './api.ts'
 import {
   type AssetOps,
   type AssetSyncResult,
+  assetContentType,
+  assetViewerUrl,
   docAssetOps,
   folderAssetOps,
   pullAssets,
+  readAssetState,
   syncAssets,
+  writeAssetState,
 } from './assets.ts'
 import { type CliConfig, clearCredentials, loginWithDeviceCode, resolveConfig, writeConfig } from './config.ts'
 import { SKILL_MD } from './skill-content.gen.ts'
@@ -100,6 +114,19 @@ function parseAssetUrlRef(value: string): AssetTarget | null {
   return null
 }
 
+const ASSET_EXTENSION_SET = new Set<string>(SYNCABLE_ASSET_FILE_EXTENSIONS)
+
+/** Lowercase extension (no dot) of a name, or '' when it has none. */
+function assetExtensionOf(name: string): string {
+  const i = name.lastIndexOf('.')
+  return i >= 0 ? name.slice(i + 1).toLowerCase() : ''
+}
+
+/** True when a local filename is a syncable asset (image/HTML) rather than a `.md` doc. */
+function isAssetFile(name: string): boolean {
+  return ASSET_EXTENSION_SET.has(assetExtensionOf(name))
+}
+
 export function createProgram(deps: ProgramDeps = {}): Command {
   const env = deps.env ?? process.env
   const cwd = deps.cwd ?? (() => process.cwd())
@@ -132,6 +159,104 @@ export function createProgram(deps: ProgramDeps = {}): Command {
 
   const assetLabel = (target: AssetTarget): string =>
     `${target.scope === 'folder' ? 'folder' : 'doc'} ${target.id}/${target.filename}`
+
+  // Resolve an explicit scope flag set (--folder | --vault | --doc) to an asset
+  // target scope, or null when none was given (the caller falls back to the
+  // default vault). A vault IS a folder, so --vault resolves to a folder id.
+  const resolveExplicitAssetScope = async (opts: {
+    folder?: string
+    vault?: string
+    doc?: string
+  }): Promise<{ scope: 'folder' | 'doc'; id: string } | null> => {
+    if ([opts.folder, opts.vault, opts.doc].filter((v) => v !== undefined).length > 1) {
+      throw new CliError(1, 'use only one of --folder, --vault, or --doc')
+    }
+    if (opts.doc !== undefined) return { scope: 'doc', id: parseDocRef(opts.doc) }
+    if (opts.vault !== undefined) return { scope: 'folder', id: (await resolveVault(apiFor(), opts.vault)).id }
+    if (opts.folder !== undefined) return { scope: 'folder', id: (await resolveFolder(apiFor(), opts.folder)).id }
+    return null
+  }
+
+  // Locate a local asset file's server scope for rm/mv: an explicit
+  // --folder/--doc wins; otherwise the folder workspace the file sits in
+  // (.glyphdown/folder.json). Errors clearly when neither is available.
+  const localAssetTarget = async (
+    fileArg: string,
+    opts: { folder?: string; doc?: string },
+  ): Promise<{ dir: string; localPath: string; scope: 'folder' | 'doc'; id: string; filename: string }> => {
+    const localPath = resolve(cwd(), fileArg)
+    const dir = dirname(localPath)
+    const filename = normalizeAssetFilename(basename(fileArg))
+    if (!filename) throw new CliError(1, `cannot derive an asset name from "${fileArg}"`)
+    const explicit = await resolveExplicitAssetScope({ folder: opts.folder, doc: opts.doc })
+    if (explicit) return { dir, localPath, scope: explicit.scope, id: explicit.id, filename }
+    const fc = readFolderConfig(dir)
+    if (!fc) {
+      throw new CliError(1, `not in a folder workspace — pass --folder <folder> (or --doc) to locate "${filename}"`)
+    }
+    return { dir, localPath, scope: 'folder', id: fc.folderId, filename }
+  }
+
+  const rmAsset = async (fileArg: string, opts: { folder?: string; doc?: string; json?: boolean }): Promise<void> => {
+    const t = await localAssetTarget(fileArg, opts)
+    const api = apiFor()
+    if (t.scope === 'folder') await api.deleteFolderAsset(t.id, t.filename)
+    else await api.deleteDocAsset(t.id, t.filename)
+
+    let archivedPath: string | undefined
+    if (existsSync(t.localPath)) {
+      const trashDir = join(workspaceRoot(t.dir), 'trash', 'assets')
+      mkdirSync(trashDir, { recursive: true })
+      archivedPath = join(trashDir, `${Date.now()}-${basename(t.localPath)}`)
+      renameSync(t.localPath, archivedPath)
+    }
+    const state = readAssetState(t.dir)
+    if (state[t.filename] !== undefined) {
+      delete state[t.filename]
+      writeAssetState(t.dir, state)
+    }
+    if (opts.json) {
+      out(JSON.stringify({ target: 'asset', scope: t.scope, id: t.id, filename: t.filename, action: 'deleted', ...(archivedPath !== undefined ? { archivedPath } : {}) }, null, 2))
+      return
+    }
+    out(`deleted ${t.filename} on the server`)
+    if (archivedPath !== undefined) out(pc.dim(`local file archived at ${archivedPath}`))
+  }
+
+  const mvAsset = async (
+    fileArg: string,
+    newName: string,
+    opts: { folder?: string; doc?: string; json?: boolean },
+  ): Promise<void> => {
+    const t = await localAssetTarget(fileArg, opts)
+    const to = normalizeAssetFilename(newName)
+    if (!to) throw new CliError(1, `cannot derive an asset name from "${newName}"`)
+    const api = apiFor()
+    const resp =
+      t.scope === 'folder'
+        ? await api.renameFolderAsset(t.id, t.filename, to)
+        : await api.renameDocAsset(t.id, t.filename, to)
+    const stored = resp.asset.filename
+
+    if (existsSync(t.localPath)) {
+      const newPath = join(t.dir, stored)
+      if (resolve(newPath) !== resolve(t.localPath)) {
+        if (existsSync(newPath)) throw new CliError(1, `server renamed to ${stored}, but a local file with that name already exists — move it aside and run \`glyphdown sync\``)
+        renameSync(t.localPath, newPath)
+      }
+    }
+    const state = readAssetState(t.dir)
+    if (state[t.filename] !== undefined) {
+      state[stored] = state[t.filename]!
+      if (stored !== t.filename) delete state[t.filename]
+      writeAssetState(t.dir, state)
+    }
+    if (opts.json) {
+      out(JSON.stringify({ target: 'asset', scope: t.scope, id: t.id, from: t.filename, to: stored, action: 'renamed' }, null, 2))
+      return
+    }
+    out(`renamed ${t.filename} → ${stored} (local file and server name)`)
+  }
 
   const assetComments = async (api: Api, target: AssetTarget): Promise<Comment[]> =>
     target.scope === 'folder'
@@ -339,10 +464,29 @@ export function createProgram(deps: ProgramDeps = {}): Command {
   // -- list -------------------------------------------------------------------
   program
     .command('list')
-    .description('docs you can access')
+    .alias('ls')
+    .description('docs you can access; with --folder, the docs AND files (assets) in that one folder/vault')
+    .option('--folder <folderRef>', 'list one folder/vault: its docs and its files (assets)')
     .option('--json', 'machine-readable output')
-    .action(async (opts: { json?: boolean }) => {
-      const docs = await apiFor().listDocs()
+    .action(async (opts: { folder?: string; json?: boolean }) => {
+      const api = apiFor()
+      if (opts.folder) {
+        const folder = await resolveFolder(api, opts.folder)
+        const docs = (await api.listDocs()).filter((d) => d.folderId === folder.id)
+        const assets = await api.listFolderAssets(folder.id)
+        if (opts.json) {
+          out(JSON.stringify({ folder: { id: folder.id, name: folder.name }, docs, assets }, null, 2))
+          return
+        }
+        if (docs.length === 0 && assets.length === 0) {
+          out('empty folder')
+          return
+        }
+        for (const d of docs) out(`${pc.dim(d.id)}  ${'doc'.padEnd(6)}  ${d.title}`)
+        for (const a of assets) out(`${pc.dim(a.id)}  ${(assetKindForContentType(a.contentType) ?? 'file').padEnd(6)}  ${a.filename}`)
+        return
+      }
+      const docs = await api.listDocs()
       if (opts.json) {
         out(JSON.stringify(docs, null, 2))
         return
@@ -466,13 +610,197 @@ export function createProgram(deps: ProgramDeps = {}): Command {
       }
     })
 
+  // -- add --------------------------------------------------------------------
+  program
+    .command('add')
+    .description('add a local file to Glyphdown: a .md becomes a doc, an image/.html file becomes a file (asset). With no --folder/--vault/--doc it lands in your default vault. Prints the URL.')
+    .argument('<file>', 'local file to upload (.md doc, or an image/.html asset)')
+    .option('--folder <folderRef>', 'target folder/vault (id or exact name)')
+    .option('--vault <vault>', 'target vault (name or id)')
+    .option('--doc <doc>', "add as an asset in this doc's namespace (assets only)")
+    .option('--name <name>', "store under this name instead of the file's basename")
+    .option('--overwrite', 'replace an existing same-named file (assets: adds a version; default suffixes -2, -3, …)')
+    .option('--share [role]', 'also mint a per-file share link (assets only): viewer (default) or commenter')
+    .option('-m, --message <note>', 'note attached to the creation push (.md docs only)')
+    .option('--json', 'machine-readable output')
+    .action(
+      async (
+        fileArg: string,
+        opts: {
+          folder?: string
+          vault?: string
+          doc?: string
+          name?: string
+          overwrite?: boolean
+          share?: boolean | string
+          message?: string
+          json?: boolean
+        },
+      ) => {
+        const path = resolve(cwd(), fileArg)
+        if (!existsSync(path)) throw new CliError(1, `no such file: ${fileArg}`)
+        const ext = assetExtensionOf(fileArg)
+        const api = apiFor()
+        const serverUrl = config().serverUrl.replace(/\/+$/, '')
+
+        // .md -> a doc (created from the file's content).
+        if (ext === 'md') {
+          if (opts.doc !== undefined) throw new CliError(1, '--doc targets an asset namespace; a .md becomes a doc (use --folder/--vault)')
+          if (opts.share !== undefined) throw new CliError(1, '--share is for assets; share a doc with `glyphdown share <doc>`')
+          if (opts.overwrite) throw new CliError(1, '--overwrite is for assets; `add` always creates a new doc (collisions get -2, -3, …)')
+          const stem = (opts.name ?? basename(fileArg)).replace(/\.md$/i, '')
+          const filename = `${slugify(stem)}.md`
+          const scope = await resolveExplicitAssetScope({ folder: opts.folder, vault: opts.vault })
+          const folderId = scope?.id
+          const meta = await api.createDoc({ filename, ...(folderId ? { folderId } : {}) })
+          const text = normalizeEol(readFileSync(path, 'utf8'))
+          let pushed = true
+          let pushError: string | undefined
+          if (text.trim() !== '') {
+            try {
+              const content = await api.getContent(meta.id, 'working')
+              const baseHash = content.baseHash ?? sha256Hex(content.text)
+              if (sha256Hex(text) !== baseHash) {
+                const { response } = await pushWithBase(api, {
+                  docId: meta.id,
+                  newText: text,
+                  baseHash,
+                  baseText: content.text,
+                  ...(opts.message !== undefined ? { note: opts.message } : {}),
+                })
+                if (!response.ok) {
+                  pushed = false
+                  pushError = response.reason
+                } else if (response.mode === 'edit' && response.failedHunks.length > 0) {
+                  pushed = false
+                  pushError = `${response.failedHunks.length} hunk(s) failed to apply`
+                }
+              }
+            } catch (error) {
+              pushed = false
+              pushError = errorMessage(error)
+            }
+          }
+          const url = `${serverUrl}/d/${meta.id}`
+          if (opts.json) {
+            out(JSON.stringify({ target: 'doc', ...meta, url, pushed, ...(pushError !== undefined ? { pushError } : {}) }, null, 2))
+          } else {
+            out(meta.id)
+            out(url)
+            if (meta.filename !== undefined && meta.filename !== filename) out(pc.dim(`created as ${meta.filename} (${filename} was taken)`))
+            if (!pushed) errOut(pc.yellow(`doc created but its content did not land (${pushError ?? 'unknown'}) — \`glyphdown pull ${meta.id}\`, re-apply, then \`push\``))
+            else out(pc.dim('to keep editing, `glyphdown pull` it into a workspace'))
+          }
+          // The doc exists but its content did not land — exit non-zero so agent
+          // chains don't treat a half-done create as success.
+          if (!pushed) throw new CliError(2, `${meta.id} created but content not applied: ${pushError ?? 'unknown'}`)
+          return
+        }
+
+        // image/.html -> a file (asset).
+        if (!isAssetFile(fileArg)) {
+          throw new CliError(1, `unsupported file type ".${ext}" — add a .md doc or an image/.html asset (${SYNCABLE_ASSET_FILE_EXTENSIONS.join(', ')})`)
+        }
+        if (opts.message !== undefined) throw new CliError(1, '-m/--message applies to .md docs only')
+        if (opts.share !== undefined && opts.doc !== undefined) throw new CliError(1, 'per-file share links are folder-scoped — drop --doc (or use --folder/--vault)')
+        const data = new Uint8Array(readFileSync(path))
+        if (data.byteLength === 0) throw new CliError(1, `${fileArg} is empty`)
+        // A bare --name (no extension) inherits the source file's, so the stored
+        // name and the content-type stay coherent.
+        let rawName = opts.name ?? basename(fileArg)
+        if (opts.name !== undefined && !rawName.includes('.')) rawName = `${rawName}.${ext}`
+        const requestedName = normalizeAssetFilename(rawName)
+        if (!requestedName) throw new CliError(1, `cannot derive an asset name from "${opts.name ?? fileArg}"`)
+        // Content-type comes from the SOURCE file's bytes/extension, never the
+        // (possibly extension-less) requested name — else HTML uploads as image/png.
+        const contentType = assetContentType(fileArg)
+        const overwrite = opts.overwrite === true
+        const scope = await resolveExplicitAssetScope({ folder: opts.folder, vault: opts.vault, doc: opts.doc })
+        const response =
+          scope === null
+            ? await api.uploadAsset(requestedName, data, contentType, overwrite)
+            : scope.scope === 'folder'
+              ? await api.uploadFolderAsset(scope.id, requestedName, data, contentType, overwrite)
+              : await api.uploadDocAsset(scope.id, requestedName, data, contentType, overwrite)
+        const stored = response.asset.filename
+        const folderId = response.folderId ?? (scope?.scope === 'folder' ? scope.id : null)
+        const docId = response.docId ?? (scope?.scope === 'doc' ? scope.id : null)
+        const viewer = folderId ? assetViewerUrl(serverUrl, folderId, stored) : null
+
+        let share: { url: string; role: ShareLinkRole; token: string } | null = null
+        if (opts.share !== undefined) {
+          if (!folderId) throw new CliError(1, 'per-file share links are for folder/vault assets only — re-run with --folder/--vault')
+          const role = opts.share === true ? ('viewer' as ShareLinkRole) : parseAssetShareRole(String(opts.share))
+          const link = await api.createAssetShareLink(folderId, stored, role)
+          share = { url: assetShareUrl(folderId, stored, link.token), role: link.role, token: link.token }
+        }
+
+        if (opts.json) {
+          out(JSON.stringify({ target: 'asset', scope: scope?.scope ?? 'folder', folderId, docId, filename: stored, url: viewer, ...(share ? { share } : {}) }, null, 2))
+          return
+        }
+        out(viewer ?? `${stored} (doc-scoped asset — open it in the web app)`)
+        if (stored !== requestedName) out(pc.dim(`stored as ${stored} (${requestedName} was taken)`))
+        if (share) {
+          out(share.url)
+          out(pc.dim(`${share.role} per-file share link`))
+        }
+      },
+    )
+
+  // -- url --------------------------------------------------------------------
+  program
+    .command('url')
+    .description('print the URL for a doc or a file (asset), idempotently — no upload. Docs by id/URL; files by filename with --folder/--doc or an asset URL.')
+    .argument('<target>', 'doc id/URL, asset URL, or asset filename with --folder/--doc')
+    .option('--folder <folderRef>', 'treat <target> as an asset filename in this folder/vault')
+    .option('--doc <doc>', 'treat <target> as an asset filename in this doc/legacy namespace')
+    .option('--json', 'machine-readable output')
+    .action(async (targetArg: string, opts: { folder?: string; doc?: string; json?: boolean }) => {
+      const api = apiFor()
+      const serverUrl = config().serverUrl.replace(/\/+$/, '')
+      const asset = await resolveAssetTarget(targetArg, opts)
+      if (asset) {
+        // A real lookup: confirm the file exists in its scope before printing.
+        const list = asset.scope === 'folder' ? await api.listFolderAssets(asset.id) : await api.listDocAssets(asset.id)
+        const normalized = normalizeAssetFilename(asset.filename)
+        const found = list.find((a) => a.filename === asset.filename) ?? list.find((a) => a.filename === normalized)
+        if (!found) throw new CliError(1, `no file "${asset.filename}" in ${assetLabel(asset)}`)
+        const url =
+          asset.scope === 'folder'
+            ? assetViewerUrl(serverUrl, asset.id, found.filename)
+            : `${serverUrl}/api/docs/${encodeURIComponent(asset.id)}/assets/${encodeURIComponent(found.filename)}`
+        if (opts.json) {
+          out(JSON.stringify({ target: 'asset', scope: asset.scope, id: asset.id, filename: found.filename, url }, null, 2))
+          return
+        }
+        out(url)
+        return
+      }
+      if (opts.folder || opts.doc) throw new CliError(1, 'asset scope options require an asset filename')
+      const docId = parseDocRef(targetArg)
+      const url = `${serverUrl}/d/${docId}`
+      if (opts.json) {
+        out(JSON.stringify({ target: 'doc', docId, url }, null, 2))
+        return
+      }
+      out(url)
+    })
+
   // -- mv ---------------------------------------------------------------------
   program
     .command('mv')
-    .description('rename a tracked doc: the local file AND the server filename move together')
-    .argument('<file>', 'tracked markdown file (pulled/cloned here)')
-    .argument('<new-name>', 'new name (slugified; the .md is optional)')
-    .action(async (fileArg: string, newName: string) => {
+    .description('rename a tracked doc OR a file (asset): the local file AND the server name move together. A renamed file keeps its comments and version history.')
+    .argument('<file>', 'tracked markdown file, or an image/.html file (asset)')
+    .argument('<new-name>', 'new name (docs slugify; the extension is kept for files)')
+    .option('--folder <folderRef>', 'locate the file (asset) in this folder/vault instead of the cwd workspace')
+    .option('--doc <doc>', "locate the file (asset) in this doc's namespace")
+    .option('--json', 'machine-readable output')
+    .action(async (fileArg: string, newName: string, opts: { folder?: string; doc?: string; json?: boolean }) => {
+      if (isAssetFile(fileArg)) {
+        await mvAsset(fileArg, newName, opts)
+        return
+      }
       const ws = findWorkspace(fileArg, cwd())
       const requestedStem = newName.replace(/\.md$/i, '')
       const filename = `${slugify(requestedStem)}.md`
@@ -500,6 +828,10 @@ export function createProgram(deps: ProgramDeps = {}): Command {
           `server renamed to ${canonical}, but the local rename failed: ${error instanceof Error ? error.message : String(error)} — run \`glyphdown sync\` to converge`,
         )
       }
+      if (opts.json) {
+        out(JSON.stringify({ target: 'doc', docId: ws.meta.docId, from: ws.meta.file, to: canonical, action: 'renamed' }, null, 2))
+        return
+      }
       out(`renamed ${ws.meta.file} → ${canonical} (local file and server filename)`)
     })
 
@@ -507,11 +839,17 @@ export function createProgram(deps: ProgramDeps = {}): Command {
   program
     .command('rm')
     .alias('delete')
-    .description('delete a tracked doc on the server and remove local tracking metadata')
-    .argument('<file>', 'tracked markdown file (pulled/cloned here)')
-    .option('--force', 'delete even when the remote changed since this workspace base')
+    .description('delete a tracked doc OR a file (asset) on the server and remove local tracking')
+    .argument('<file>', 'tracked markdown file, or an image/.html file (asset)')
+    .option('--force', 'delete even when the remote changed since this workspace base (docs only)')
+    .option('--folder <folderRef>', 'locate the file (asset) in this folder/vault instead of the cwd workspace')
+    .option('--doc <doc>', "locate the file (asset) in this doc's namespace")
     .option('--json', 'machine-readable output')
-    .action(async (fileArg: string, opts: { force?: boolean; json?: boolean }) => {
+    .action(async (fileArg: string, opts: { force?: boolean; folder?: string; doc?: string; json?: boolean }) => {
+      if (isAssetFile(fileArg)) {
+        await rmAsset(fileArg, opts)
+        return
+      }
       const ws = findWorkspace(fileArg, cwd())
       const api = apiFor(ws.meta.serverUrl)
 

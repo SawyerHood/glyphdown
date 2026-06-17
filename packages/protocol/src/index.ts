@@ -443,8 +443,16 @@ export interface FolderListingResponse {
 // Assets (images and standalone HTML files stored in R2, scoped to a doc's
 // folder — or the doc itself when it is folderless)
 // ---------------------------------------------------------------------------
+// POST   /api/assets?filename=<name>[&overwrite=true]
+//          raw image/* or text/html body (≤ 10 MB), authenticated -> UploadAssetResponse
+//          Scopeless sibling of POST /api/docs — lands the asset in the
+//          caller's default vault (ensureDefaultVault), so a one-shot upload
+//          needs no folder. The response carries folderId for the viewer URL.
 // POST   /api/docs/:id/assets?filename=<name>[&overwrite=true]
 //          raw image/* or text/html body (≤ 10 MB), role editor+  -> UploadAssetResponse
+// POST   /api/docs/:id/assets/<filename>/rename     -> UploadAssetResponse
+//          { to } renames in place, preserving the asset id (and so its
+//          comments, version history, and share links). editor+.
 // GET    /api/docs/:id/assets                        -> { assets: AssetMeta[] }
 // GET    /api/docs/:id/assets/<filename>             -> bytes (viewer+, ETag,
 //          cache-control: private; share token via ?share= / X-Glyphdown-Share —
@@ -453,6 +461,8 @@ export interface FolderListingResponse {
 // POST   /api/folders/:id/assets?filename=<name>[&overwrite=true]
 //          raw image/* or text/html body (≤ 10 MB), folder role editor+
 //          -> UploadAssetResponse
+// POST   /api/folders/:id/assets/<filename>/rename  -> UploadAssetResponse
+//          { to } renames in place, preserving the asset id (folder role editor+).
 // GET    /api/folders/:id/assets                     -> { assets: AssetMeta[] }
 // GET    /api/folders/:id/assets/<filename>          -> bytes (CLI sync flow)
 // DELETE /api/folders/:id/assets/<filename>          -> { ok: true } (folder
@@ -474,6 +484,15 @@ export interface UploadAssetResponse {
   asset: AssetMeta
   /** Markdown-relative path to embed: `![alt](<path>)`. */
   path: string
+  /**
+   * The folder the asset landed in, when folder-scoped. Set by the scopeless
+   * `POST /api/assets` (default-vault) upload and by folder uploads/renames so a
+   * caller that did not pick the scope can still build the `/f/:folderId/file/…`
+   * viewer URL. Null/absent for doc-scoped (legacy) assets.
+   */
+  folderId?: string | null
+  /** The doc namespace the asset landed in, when doc-scoped (legacy). */
+  docId?: string | null
 }
 
 export interface AssetVersionMeta {

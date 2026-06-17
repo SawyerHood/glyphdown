@@ -339,3 +339,44 @@ describe('pushWithBase', () => {
     expect(body.suggest).toBe(true)
   })
 })
+
+describe('createApi — unified file (asset) methods', () => {
+  it('uploadAsset POSTs raw bytes to the scopeless /api/assets with the filename query', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ asset: { filename: 'r.html' }, path: 'r.html', folderId: 'v1', docId: null }))
+    const api = apiWith(fetchMock as unknown as typeof fetch)
+    const data = new TextEncoder().encode('<h1>x</h1>')
+    const res = await api.uploadAsset('r.html', data, 'text/html')
+    const [url, init] = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls[0]! as [string, RequestInit]
+    expect(url).toBe(`${SERVER}/api/assets?filename=r.html`)
+    expect(init.method).toBe('POST')
+    expect((init.headers as Record<string, string>)['content-type']).toBe('text/html')
+    expect(res.folderId).toBe('v1')
+  })
+
+  it('uploadAsset adds overwrite=true when requested', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ asset: { filename: 'r.html' }, path: 'r.html' }))
+    const api = apiWith(fetchMock as unknown as typeof fetch)
+    await api.uploadAsset('r.html', new Uint8Array([1]), 'text/html', true)
+    const [url] = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls[0]! as [string]
+    expect(url).toBe(`${SERVER}/api/assets?filename=r.html&overwrite=true`)
+  })
+
+  it('renameFolderAsset POSTs { to } to the folder rename route', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ asset: { filename: 'new.html' }, path: 'new.html', folderId: 'f1', docId: null }))
+    const api = apiWith(fetchMock as unknown as typeof fetch)
+    await api.renameFolderAsset('f1', 'old.html', 'new.html')
+    const [url, init] = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls[0]! as [string, RequestInit]
+    expect(url).toBe(`${SERVER}/api/folders/f1/assets/old.html/rename`)
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body as string)).toEqual({ to: 'new.html' })
+  })
+
+  it('deleteFolderAsset DELETEs the asset path', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ ok: true }))
+    const api = apiWith(fetchMock as unknown as typeof fetch)
+    await api.deleteFolderAsset('f1', 'pic.png')
+    const [url, init] = (fetchMock as unknown as ReturnType<typeof vi.fn>).mock.calls[0]! as [string, RequestInit]
+    expect(url).toBe(`${SERVER}/api/folders/f1/assets/pic.png`)
+    expect(init.method).toBe('DELETE')
+  })
+})

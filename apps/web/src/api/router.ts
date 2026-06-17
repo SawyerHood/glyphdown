@@ -129,6 +129,22 @@ export async function handleApi(request: Request): Promise<Response | null> {
     return handleSearch(db, url, principal)
   }
 
+  // Scopeless asset upload: the sibling of POST /api/docs. With no folder in the
+  // path it lands the asset in the caller's default vault (ensureDefaultVault —
+  // for agents, the OWNER's), so a one-shot `glyphdown add <file>` needs no
+  // clone. Delegates to the folder-scoped machinery; the response carries the
+  // resolved folderId for the viewer URL.
+  if (url.pathname === '/api/assets') {
+    const principal = await resolvePrincipal(request, db)
+    if (!principal) return json({ error: 'unauthenticated' }, 401)
+    if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405)
+    const userId = effectiveUserId(principal)
+    if (userId === null) return json({ error: 'forbidden' }, 403)
+    const folderId = await ensureDefaultVault(db, userId)
+    const auth: AuthContext = { principal, role: 'owner' }
+    return handleFolderAssets(db, asAppEnv(env).ASSETS, request, url, folderId, '/assets', auth)
+  }
+
   const docMatch = url.pathname.match(/^\/api\/docs\/([^/]+)(\/.*)?$/)
   if (docMatch) return handleDocScoped(db, request, url, docMatch[1]!, docMatch[2] ?? '')
 

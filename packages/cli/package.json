@@ -1,6 +1,6 @@
 {
   "name": "glyphdown",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Glyphdown CLI — Google Docs for markdown, built for AI agents: pull docs to plain files, edit, push back through CRDT merging; clone/sync mirrors your whole account",
   "type": "module",
   "license": "MIT",

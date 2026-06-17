@@ -271,6 +271,13 @@ export async function handleDocAssets(
     return streamAssetCommentingView(db, bucket, scope, filename, fallbackIds, assetPublicPath(url))
   }
 
+  const renameMatch = subPath.match(/^\/assets\/([^/]+)\/rename$/)
+  if (renameMatch) {
+    if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405)
+    if (!roleAtLeast(auth.role, 'editor')) return json({ error: 'forbidden' }, 403)
+    return renameAsset(db, bucket, request, scope, safeDecode(renameMatch[1]!), fallbackIds)
+  }
+
   const match = subPath.match(/^\/assets\/([^/]+)$/)
   if (!match) return json({ error: 'not-found' }, 404)
   const filename = safeDecode(match[1]!)
@@ -330,6 +337,13 @@ export async function handleFolderAssets(
     return streamAssetCommentingView(db, bucket, scope, filename, fallbackIds, assetPublicPath(url), expectedAssetId)
   }
 
+  const renameMatch = subPath.match(/^\/assets\/([^/]+)\/rename$/)
+  if (renameMatch) {
+    if (request.method !== 'POST') return json({ error: 'method-not-allowed' }, 405)
+    if (auth === null || !roleAtLeast(auth.role, 'editor')) return json({ error: 'forbidden' }, 403)
+    return renameAsset(db, bucket, request, scope, safeDecode(renameMatch[1]!), fallbackIds)
+  }
+
   const match = subPath.match(/^\/assets\/([^/]+)$/)
   if (!match) return json({ error: 'not-found' }, 404)
   const filename = safeDecode(match[1]!)
@@ -384,7 +398,7 @@ async function uploadAsset(
       throw err
     }
     const row = result.row
-    return json({ asset: assetMeta(row), path: existing.filename } satisfies UploadAssetResponse)
+    return json({ asset: assetMeta(row), path: existing.filename, ...scopeRef(scope) } satisfies UploadAssetResponse)
   }
 
   const filename = uniqueAssetFilename(normalized, new Set(existingRows.map((r) => r.filename)))
@@ -425,7 +439,74 @@ async function uploadAsset(
   })
   const row: AssetRow = { ...insertRow, currentVersionId: versionId }
   await notifyHtmlAssetContentChanged(row, body, auth)
-  return json({ asset: assetMeta(row), path: filename } satisfies UploadAssetResponse)
+  return json({ asset: assetMeta(row), path: filename, ...scopeRef(scope) } satisfies UploadAssetResponse)
+}
+
+/** Folder/doc id of a scope, shaped for UploadAssetResponse (one or the other). */
+function scopeRef(scope: AssetScope): { folderId: string | null; docId: string | null } {
+  return scope.kind === 'folder' ? { folderId: scope.id, docId: null } : { folderId: null, docId: scope.id }
+}
+
+/**
+ * Rename an asset in place: same row id (so its comment thread, version history,
+ * and share links survive — those all key off the asset id), new filename. The
+ * stored r2_key follows the filename; legacy rows whose bytes live at r2_key get
+ * those bytes moved, modern rows serve from content blobs so only metadata moves.
+ * Collisions in the row's own namespace 409, matching the doc-rename contract.
+ */
+async function renameAsset(
+  db: Db,
+  bucket: R2Bucket,
+  request: Request,
+  scope: AssetScope,
+  filename: string,
+  fallbackDocIds: string[],
+): Promise<Response> {
+  const row = await resolveAssetRow(db, scope, filename, fallbackDocIds)
+  if (!row) return json({ error: 'not-found' }, 404)
+  const payload = await readJson<{ to?: unknown; filename?: unknown }>(request)
+  const rawTo = payload?.to ?? payload?.filename
+  if (typeof rawTo !== 'string') return json({ error: 'bad-name' }, 400)
+  const normalized = normalizeAssetFilename(rawTo)
+  if (!normalized) return json({ error: 'bad-filename' }, 400)
+
+  // Rename within the row's OWN namespace — a folder-scope request may have
+  // resolved a legacy doc-scoped row via the fallback, and its bytes/key live
+  // in that doc scope. Reuses the same scope→key mapping uploads use.
+  const rowScope: AssetScope = row.folderId !== null ? { kind: 'folder', id: row.folderId } : { kind: 'doc', id: row.docId! }
+  if (normalized === row.filename) {
+    return json({ asset: assetMeta(row), path: row.filename, ...scopeRef(rowScope) } satisfies UploadAssetResponse)
+  }
+  // Collision in the row's own namespace…
+  if (await findAssetRow(db, rowScope, normalized)) return json({ error: 'filename-taken' }, 409)
+  // …and, when renaming a legacy doc-scoped row resolved through a folder request,
+  // a folder-scoped row with the new name would SHADOW the renamed row in the
+  // merged listing — reject that too rather than silently strand it.
+  if (scope.kind === 'folder' && rowScope.kind === 'doc' && (await findAssetRow(db, scope, normalized))) {
+    return json({ error: 'filename-taken' }, 409)
+  }
+
+  const newKey = assetR2Key(rowScope, normalized)
+  // Legacy rows keep their bytes at r2_key; modern rows never wrote there (they
+  // serve from content-addressed blobs), so move only when bytes are present.
+  const legacyObject = await bucket.get(row.r2Key)
+  if (legacyObject) {
+    await bucket.put(newKey, await objectArrayBuffer(legacyObject))
+    await bucket.delete(row.r2Key)
+  }
+  try {
+    await db.update(assets).set({ filename: normalized, r2Key: newKey }).where(eq(assets.id, row.id))
+  } catch (err) {
+    // The check above and the update can't share a transaction on D1, so a
+    // concurrent writer can still trip the (scope, filename) unique index.
+    if (err instanceof Error && /unique/i.test(err.message)) {
+      if (legacyObject) await bucket.delete(newKey) // undo the speculative byte copy
+      return json({ error: 'filename-taken' }, 409)
+    }
+    throw err
+  }
+  const updated: AssetRow = { ...row, filename: normalized, r2Key: newKey }
+  return json({ asset: assetMeta(updated), path: normalized, ...scopeRef(rowScope) } satisfies UploadAssetResponse)
 }
 
 interface PreparedBlob {

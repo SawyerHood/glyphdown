@@ -1,6 +1,6 @@
 ---
 name: glyphdown
-description: Collaborate on Glyphdown docs (Google Docs for markdown) via the glyphdown CLI. Use when users ask to edit my glyphdown docs, sync my markdown notes, pull my notes, push this writeup, leave suggestions on the doc, comment on a doc, share a doc with a public link, clone my glyphdown workspace, or any markdown collaboration with glyphdown.com docs. Trigger phrases include "glyphdown", "sync my notes", "pull the doc", "push my edits", "suggest changes on the doc", "check comments on the doc", "share the doc", "make a public link".
+description: Collaborate on Glyphdown docs and files (Google Docs for markdown) via the glyphdown CLI. Use when users ask to edit my glyphdown docs, sync my markdown notes, pull my notes, push this writeup, upload a file/image/HTML asset and get its link, list a folder's files, leave suggestions on the doc, comment on a doc, share a doc with a public link, clone my glyphdown workspace, or any markdown collaboration with glyphdown.com docs. Trigger phrases include "glyphdown", "sync my notes", "pull the doc", "push my edits", "add this file to glyphdown", "upload this html/image", "get the link for", "suggest changes on the doc", "check comments on the doc", "share the doc", "make a public link".
 ---
 
 # Glyphdown
@@ -31,13 +31,29 @@ Sync prints one action per doc/folder: `pushed` / `pulled` / `merged` / `created
 
 Single docs without a clone: `glyphdown pull <id|url>` → edit → `glyphdown push <file>`.
 
+## Files (docs and assets, same verbs)
+
+Docs (`.md`, collaborative CRDT) and other files (images/`.html`, opaque blobs — last-write-wins, no merge) share one CLI surface; the verbs dispatch by file type. No clone needed to add one file:
+
+```sh
+glyphdown add report.html                  # upload one file → prints its viewer URL (lands in your default vault)
+glyphdown add chart.png --folder Research  # target a folder/vault; --vault and --doc also work
+glyphdown add notes.md                     # a .md is created as a DOC with the file's content, in one step
+glyphdown ls --folder Research             # docs AND files in one folder
+glyphdown url page.html --folder Research  # a file's URL anytime, idempotent (no re-upload)
+glyphdown mv old.png new.png               # rename (server+local); a file keeps its comments/versions/share links
+glyphdown rm page.html                     # delete on the server + archive the local copy
+```
+
+`new` makes an EMPTY doc; `add <file.md>` is create-with-content. Scope is optional (default vault) — pass `--folder`/`--vault`/`--doc` to target one. Outside a folder workspace, `mv`/`rm`/`url`/`cat` on a file need an explicit `--folder`/`--doc`. A doc and a file may share a name in a folder, so address a file by filename + scope (or its viewer URL), not bare.
+
 ## Suggestions instead of edits
 
 For reviewable changes: `glyphdown push <file> --suggest -m "why"` (or sync with a suggester-role key — pushes land as suggestions automatically). Humans accept/reject in the web UI; your local base does not advance — re-pull after review. List with `glyphdown suggestions <doc> --json`.
 
 ## Renames
 
-`glyphdown mv <file> <new-name>` — NEVER bare `mv`: sync does not detect renames, so the old name re-pulls and the new file becomes a duplicate doc. `mv` renames the local file and the server filename together.
+`glyphdown mv <file> <new-name>` — NEVER bare `mv`: sync does not detect renames, so the old name re-pulls and the new file becomes a duplicate doc. `mv` renames the local file and the server name together — for both docs and files (assets); a renamed file keeps its comments, versions, and share links.
 
 ## Deletes
 
@@ -81,7 +97,7 @@ The token IS the capability — treat share URLs as secrets.
 
 ## Rules
 
-- `--json` on read commands (`list`, `vaults`, `cat`, `comments`, `suggestions`, `new`, `sync`, `share`) for parsing.
+- `--json` on read commands (`list`/`ls`, `vaults`, `cat`, `url`, `comments`, `suggestions`, `new`, `add`, `sync`, `share`) for parsing.
 - Filenames are canonical slugs (`[a-z0-9-]` + `.md`); the file name IS the doc name everywhere. The `# heading` is just content.
 - Don't rewrite >60% of a shared doc in one push (the server refuses with exit 3). `glyphdown snapshot <doc> -m "msg"` before big changes.
 - Deletions never propagate implicitly: deleted local files re-pull; server-deleted docs warn (`remote gone`) and stay local. Use `glyphdown rm <file>` for intentional doc deletes; it refuses remote drift unless you pass `--force`.
