@@ -14,6 +14,7 @@ export type { CliConfig, DeviceLoginIO } from './config.ts'
 export {
   assetStatePath,
   assetContentType,
+  assetViewerUrl,
   decideAssetSync,
   docAssetOps,
   folderAssetOps,

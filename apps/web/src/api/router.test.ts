@@ -235,6 +235,57 @@ describe('POST /api/docs without folderId', () => {
 })
 
 // ---------------------------------------------------------------------------
+// POST /api/assets → scopeless upload into the default vault
+// ---------------------------------------------------------------------------
+
+describe('POST /api/assets (scopeless)', () => {
+  function uploadInit(body: Uint8Array, contentType: string, headers: Record<string, string>) {
+    return {
+      method: 'POST',
+      headers: { ...headers, 'content-type': contentType },
+      body: body as unknown as BodyInit,
+    }
+  }
+
+  it("lands the asset in the owner's default vault, minting Home on first use", async () => {
+    const headers = principalFor('alice')
+    const bytes = new TextEncoder().encode('<h1>hi</h1>')
+    const res = await api('/api/assets?filename=report.html', uploadInit(bytes, 'text/html', headers))
+    expect(res!.status).toBe(200)
+    const body = await jsonOf<{ asset: { filename: string }; folderId: string; docId: string | null }>(res)
+
+    const vault = raw.prepare(`SELECT id, name, kind FROM folders WHERE owner_user_id = 'alice'`).get() as {
+      id: string
+      name: string
+      kind: string
+    }
+    expect(vault).toMatchObject({ name: 'Home', kind: 'vault' })
+    expect(body.folderId).toBe(vault.id)
+    expect(body.docId).toBeNull()
+    expect(body.asset.filename).toBe('report.html')
+    // The row is folder-scoped to the default vault.
+    expect(raw.prepare(`SELECT folder_id FROM assets WHERE filename = 'report.html'`).get()).toEqual({ folder_id: vault.id })
+  })
+
+  it('reuses the existing default vault', async () => {
+    const headers = principalFor('alice')
+    seedVault('v-home', 'alice')
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1])
+    const body = await jsonOf<{ folderId: string }>(
+      await api('/api/assets?filename=pic.png', uploadInit(bytes, 'image/png', headers)),
+    )
+    expect(body.folderId).toBe('v-home')
+    expect(raw.prepare(`SELECT COUNT(*) AS n FROM folders`).get()).toEqual({ n: 1 })
+  })
+
+  it('401s without authentication and 405s on non-POST', async () => {
+    expect((await api('/api/assets?filename=x.png', { method: 'POST' }))!.status).toBe(401)
+    const headers = principalFor('alice')
+    expect((await api('/api/assets', { method: 'GET', headers }))!.status).toBe(405)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // patchDoc invariants + move recheck fan-out
 // ---------------------------------------------------------------------------
 

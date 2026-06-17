@@ -134,6 +134,22 @@ export interface Api {
     contentType: string,
     overwrite?: boolean,
   ): Promise<UploadAssetResponse>
+  /**
+   * POST /api/assets — scopeless upload: the asset lands in the caller's default
+   * vault (the asset analog of `createDoc` with no folderId), so a one-shot
+   * upload needs no clone. The response carries `folderId` for the viewer URL.
+   */
+  uploadAsset(filename: string, data: Uint8Array, contentType: string, overwrite?: boolean): Promise<UploadAssetResponse>
+  /**
+   * Rename an asset in place. The server preserves the asset id, so its comment
+   * thread, version history, and share links survive. 409 `filename-taken` on a
+   * collision in the target namespace.
+   */
+  renameFolderAsset(folderId: string, filename: string, to: string): Promise<UploadAssetResponse>
+  renameDocAsset(docId: string, filename: string, to: string): Promise<UploadAssetResponse>
+  /** DELETE an asset (editor+ on its folder/doc). */
+  deleteFolderAsset(folderId: string, filename: string): Promise<void>
+  deleteDocAsset(docId: string, filename: string): Promise<void>
   listDocAssetComments(docId: string, filename: string): Promise<Comment[]>
   listFolderAssetComments(folderId: string, filename: string): Promise<Comment[]>
   createDocAssetComment(docId: string, filename: string, input: CreateAssetCommentRequest): Promise<Comment>
@@ -425,11 +441,31 @@ export function createApi(opts: ApiOptions): Api {
     },
 
     uploadDocAsset(docId, filename, data, contentType, overwrite = false) {
-      return uploadAsset(`/api/docs/${encodeURIComponent(docId)}/assets`, filename, data, contentType, overwrite)
+      return postAsset(`/api/docs/${encodeURIComponent(docId)}/assets`, filename, data, contentType, overwrite)
     },
 
     uploadFolderAsset(folderId, filename, data, contentType, overwrite = false) {
-      return uploadAsset(`/api/folders/${encodeURIComponent(folderId)}/assets`, filename, data, contentType, overwrite)
+      return postAsset(`/api/folders/${encodeURIComponent(folderId)}/assets`, filename, data, contentType, overwrite)
+    },
+
+    uploadAsset(filename, data, contentType, overwrite = false) {
+      return postAsset('/api/assets', filename, data, contentType, overwrite)
+    },
+
+    renameFolderAsset(folderId, filename, to) {
+      return requestJson<UploadAssetResponse>('POST', assetFilePath('folders', folderId, filename, undefined, '/rename'), { to })
+    },
+
+    renameDocAsset(docId, filename, to) {
+      return requestJson<UploadAssetResponse>('POST', assetFilePath('docs', docId, filename, undefined, '/rename'), { to })
+    },
+
+    async deleteFolderAsset(folderId, filename) {
+      await requestJson<unknown>('DELETE', assetFilePath('folders', folderId, filename))
+    },
+
+    async deleteDocAsset(docId, filename) {
+      await requestJson<unknown>('DELETE', assetFilePath('docs', docId, filename))
     },
 
     async listDocAssetComments(docId, filename) {
@@ -521,8 +557,8 @@ export function createApi(opts: ApiOptions): Api {
     },
   }
 
-  function assetFilePath(scope: 'docs' | 'folders', id: string, filename: string, versionId?: string): string {
-    const path = `/api/${scope}/${encodeURIComponent(id)}/assets/${encodeURIComponent(filename)}`
+  function assetFilePath(scope: 'docs' | 'folders', id: string, filename: string, versionId?: string, sub = ''): string {
+    const path = `/api/${scope}/${encodeURIComponent(id)}/assets/${encodeURIComponent(filename)}${sub}`
     return versionId === undefined ? path : `${path}?version=${encodeURIComponent(versionId)}`
   }
 
@@ -539,7 +575,7 @@ export function createApi(opts: ApiOptions): Api {
     return `/api/folders/${encodeURIComponent(folderId)}/assets/${encodeURIComponent(filename)}/share-links${sub}`
   }
 
-  async function uploadAsset(
+  async function postAsset(
     path: string,
     filename: string,
     data: Uint8Array,
