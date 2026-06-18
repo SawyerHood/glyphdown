@@ -359,6 +359,16 @@ function computeDecorations(state: EditorState): DecorationSet {
       // --- Headings -------------------------------------------------------
       const level = HEADINGS[name]
       if (level !== undefined) {
+        // A Setext heading's "heading-ness" is decided by the line BELOW it
+        // (`text` + a `-`/`=` underline). While you edit the block, that
+        // underline is mid-keystroke: typing `-` under a paragraph to start a
+        // bullet list momentarily parses as a Setext h2, flashing the
+        // paragraph to giant heading type until enough of `- item` is typed to
+        // re-parse as a list. Skip the line styling while the caret is on the
+        // block so the paragraph stays put; it renders as a heading once the
+        // caret leaves and the underline is unambiguous. ATX headings carry
+        // their own `#` marker on the line, so they style while edited.
+        if (name.startsWith('SetextHeading') && touchesLine(state, node.from, node.to)) return
         lineClasses(state, node.from, node.to, `cm-ink-heading cm-ink-h${level}`, decos)
         if (name.startsWith('ATXHeading') && !touchesLine(state, node.from, node.to)) {
           for (const mark of node.node.getChildren('HeaderMark')) {
