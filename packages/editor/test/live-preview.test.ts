@@ -64,6 +64,23 @@ describe('live preview: headings', () => {
     expect(hiddenRanges(state)).toContainEqual({ from: 0, to: 3 })
     expect(hiddenRanges(state)).toContainEqual({ from: 8, to: 15 })
   })
+
+  it('does not style a Setext heading while the caret is editing the block', () => {
+    // Typing `-` under "hello" to start a bullet list momentarily parses as a
+    // Setext h2 ("hello" + `-` underline). With the caret on the underline the
+    // paragraph must stay un-styled rather than flashing to heading type.
+    const doc = 'hello\n-'
+    const state = previewState(doc, doc.length)
+    expect(decorationsWithClass(state, 'cm-ink-h2')).toHaveLength(0)
+  })
+
+  it('styles a Setext heading once the caret leaves the block', () => {
+    const state = previewState('hello\n-\n\nbody', 11)
+    // The Setext node spans the text line and its underline; both get the
+    // heading line class. The text line ("hello", from 0) is what shows big.
+    const lines = decorationsWithClass(state, 'cm-ink-h2')
+    expect(lines.some((l) => l.from === 0)).toBe(true)
+  })
 })
 
 describe('live preview: links', () => {
