@@ -1,5 +1,5 @@
 export { glyphdownMarkdown, highlightExtension } from './markdown.ts'
-export { markdownAutoClose, autoCloseInsert, autoCloseBackspace } from './autoclose.ts'
+export { markdownAutoClose, autoCloseInsert, autoCloseBackspace, markdownFormat } from './autoclose.ts'
 export { markdownTab, markdownTabCommand } from './tab.ts'
 export {
   MAX_QUOTE_DEPTH,

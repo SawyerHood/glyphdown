@@ -2,6 +2,7 @@ import {
   EditorSelection,
   type EditorState,
   type Extension,
+  type SelectionRange,
   MapMode,
   RangeSet,
   RangeValue,
@@ -35,6 +36,64 @@ function boundaryOk(state: EditorState, pos: number): boolean {
   const line = state.doc.lineAt(pos)
   if (pos === line.from) return true
   return BOUNDARY_BEFORE.test(state.doc.sliceString(pos - 1, pos))
+}
+
+const WORD_CHAR = /[\p{L}\p{N}_']/u
+const WORD_LETTER = /\p{L}/u
+
+interface TextRange {
+  from: number
+  to: number
+  anchor: number
+  head: number
+}
+
+function isWordChar(ch: string): boolean {
+  return ch.length > 0 && WORD_CHAR.test(ch)
+}
+
+function expandWordAt(state: EditorState, pos: number): TextRange | null {
+  if (pos < 0 || pos >= state.doc.length || !isWordChar(state.doc.sliceString(pos, pos + 1))) return null
+
+  let from = pos
+  while (from > 0 && isWordChar(state.doc.sliceString(from - 1, from))) from--
+
+  let to = pos + 1
+  while (to < state.doc.length && isWordChar(state.doc.sliceString(to, to + 1))) to++
+
+  const text = state.doc.sliceString(from, to)
+  if (!WORD_LETTER.test(text)) return null
+
+  return { from, to, anchor: from, head: to }
+}
+
+function wordNextToCursor(state: EditorState, pos: number): TextRange | null {
+  const before = pos > 0 ? state.doc.sliceString(pos - 1, pos) : ''
+  const after = state.doc.sliceString(pos, pos + 1)
+  const beforeWord = isWordChar(before)
+  const afterWord = isWordChar(after)
+  if (beforeWord === afterWord) return null
+  return afterWord ? expandWordAt(state, pos) : expandWordAt(state, pos - 1)
+}
+
+function wordAtOrNextToCursor(state: EditorState, pos: number): TextRange | null {
+  if (pos < state.doc.length && isWordChar(state.doc.sliceString(pos, pos + 1))) return expandWordAt(state, pos)
+  if (pos > 0 && isWordChar(state.doc.sliceString(pos - 1, pos))) return expandWordAt(state, pos - 1)
+  return null
+}
+
+function rangeTextTarget(state: EditorState, range: SelectionRange): TextRange {
+  if (!range.empty) return { from: range.from, to: range.to, anchor: range.anchor, head: range.head }
+  return wordAtOrNextToCursor(state, range.head) ?? { from: range.head, to: range.head, anchor: range.head, head: range.head }
+}
+
+function isWrapped(state: EditorState, range: TextRange, open: string, close: string): boolean {
+  return (
+    range.from >= open.length &&
+    range.to + close.length <= state.doc.length &&
+    state.doc.sliceString(range.from - open.length, range.from) === open &&
+    state.doc.sliceString(range.to, range.to + close.length) === close
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +242,21 @@ export function autoCloseInsert(state: EditorState, ch: string): TransactionSpec
       if (after === ch && isTrackedCloser(state, head)) {
         return { range: EditorSelection.cursor(head + 1) }
       }
+      // Boundary word wrap: *word| / |word + * becomes *word*, with the
+      // wrapped word selected so a second * naturally makes **word**.
+      if (ch === '*') {
+        const word = wordNextToCursor(state, head)
+        if (word) {
+          return {
+            changes: [
+              { from: word.from, insert: ch },
+              { from: word.to, insert: ch },
+            ],
+            effects: trackCloserEffect.of(word.to + 1),
+            range: EditorSelection.range(word.from + 1, word.to + 1),
+          }
+        }
+      }
       // Close: open a pair when the boundary guard passes.
       if (UNGUARDED_SAME.includes(ch) || boundaryOk(state, head)) {
         return {
@@ -213,6 +287,43 @@ export function autoCloseInsert(state: EditorState, ch: string): TransactionSpec
   if (dont) return null
 
   return { ...byRange, scrollIntoView: true, userEvent: 'input.type' }
+}
+
+export function markdownFormat(state: EditorState, open: string, close = open): TransactionSpec | null {
+  if (state.readOnly || open.length === 0 || close.length === 0) return null
+
+  const byRange = state.changeByRange((selectionRange) => {
+    const target = rangeTextTarget(state, selectionRange)
+
+    if (isWrapped(state, target, open, close)) {
+      return {
+        changes: [
+          { from: target.from - open.length, to: target.from },
+          { from: target.to, to: target.to + close.length },
+        ],
+        range: EditorSelection.range(target.anchor - open.length, target.head - open.length),
+      }
+    }
+
+    return {
+      changes: [
+        { from: target.from, insert: open },
+        { from: target.to, insert: close },
+      ],
+      range: EditorSelection.range(target.anchor + open.length, target.head + open.length),
+    }
+  })
+
+  return { ...byRange, scrollIntoView: true, userEvent: 'input.type' }
+}
+
+function formatCommand(open: string, close = open) {
+  return (view: EditorView): boolean => {
+    const spec = markdownFormat(view.state, open, close)
+    if (!spec) return false
+    view.dispatch(spec)
+    return true
+  }
 }
 
 /**
@@ -269,14 +380,18 @@ const autoCloseKeymap = keymap.of([
       return true
     },
   },
+  { key: 'Mod-b', run: formatCommand('**') },
+  { key: 'Mod-i', run: formatCommand('*') },
+  { key: 'Mod-u', run: formatCommand('<u>', '</u>') },
 ])
 
 /**
  * Markdown auto-closing pairs: emphasis (* _ ~), quotes (` "), brackets
- * ([ ( {), ``` fence expansion, and Backspace deleting empty pairs. All
- * insertions dispatch as 'input.type' so suggest mode routes them through
- * the SuggestSession like ordinary typing. Place before the default keymap
- * so the Backspace binding wins over deleteCharBackward.
+ * ([ ( {), ``` fence expansion, Backspace deleting empty pairs, and common
+ * formatting shortcuts (Mod-B/I/U). All insertions dispatch as 'input.type'
+ * so suggest mode routes them through the SuggestSession like ordinary
+ * typing. Place before the default keymap so the Backspace binding wins over
+ * deleteCharBackward.
  */
 export function markdownAutoClose(): Extension {
   return [trackedClosersField, inputHandler, autoCloseKeymap]

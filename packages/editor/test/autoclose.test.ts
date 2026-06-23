@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { EditorSelection, EditorState } from '@codemirror/state'
 import * as Y from 'yjs'
 import { resolveAnchor, type Suggestion } from '@glyphdown/core'
-import { autoCloseBackspace, autoCloseInsert, createSuggestMode, markdownAutoClose } from '../src/index.ts'
+import { autoCloseBackspace, autoCloseInsert, createSuggestMode, markdownAutoClose, markdownFormat } from '../src/index.ts'
 
 function autoCloseState(doc = '', anchor = 0, head = anchor): EditorState {
   return EditorState.create({
@@ -22,6 +22,12 @@ function type(state: EditorState, ch: string): EditorState {
     selection: EditorSelection.cursor(from + ch.length),
     userEvent: 'input.type',
   }).state
+}
+
+function format(state: EditorState, open: string, close = open): EditorState {
+  const spec = markdownFormat(state, open, close)
+  expect(spec).not.toBeNull()
+  return state.update(spec!).state
 }
 
 function cursor(state: EditorState): number {
@@ -49,6 +55,28 @@ describe('auto close: close rule', () => {
     expect(state.doc.toString()).toBe('word``')
     expect(cursor(state)).toBe(5)
   })
+
+  it('wraps the word after the cursor when typing * before it', () => {
+    const state = type(autoCloseState('hello', 0), '*')
+    expect(state.doc.toString()).toBe('*hello*')
+    expect(state.selection.main.from).toBe(1)
+    expect(state.selection.main.to).toBe(6)
+  })
+
+  it('wraps the word before the cursor when typing * after it', () => {
+    const state = type(autoCloseState('hello', 5), '*')
+    expect(state.doc.toString()).toBe('*hello*')
+    expect(state.selection.main.from).toBe(1)
+    expect(state.selection.main.to).toBe(6)
+  })
+
+  it('turns a word wrap into bold when typing a second *', () => {
+    let state = type(autoCloseState('hello', 5), '*')
+    state = type(state, '*')
+    expect(state.doc.toString()).toBe('**hello**')
+    expect(state.selection.main.from).toBe(2)
+    expect(state.selection.main.to).toBe(7)
+  })
 })
 
 describe('auto close: boundary guard', () => {
@@ -58,6 +86,14 @@ describe('auto close: boundary guard', () => {
 
   it('rejects * between digits (2*3)', () => {
     expect(autoCloseInsert(autoCloseState('23', 1), '*')).toBeNull()
+  })
+
+  it('does not word-wrap plain numbers', () => {
+    expect(autoCloseInsert(autoCloseState('23', 2), '*')).toBeNull()
+  })
+
+  it('does not word-wrap from inside a word', () => {
+    expect(autoCloseInsert(autoCloseState('hello', 2), '*')).toBeNull()
   })
 
   it('rejects " mid-word', () => {
@@ -151,6 +187,36 @@ describe('auto close: selection wrap', () => {
     const [a, b] = state.selection.ranges
     expect({ from: a!.from, to: a!.to }).toEqual({ from: 1, to: 4 })
     expect({ from: b!.from, to: b!.to }).toEqual({ from: 7, to: 10 })
+  })
+})
+
+describe('markdown format shortcuts', () => {
+  it('bolds the word before the cursor', () => {
+    const state = format(autoCloseState('hello', 5), '**')
+    expect(state.doc.toString()).toBe('**hello**')
+    expect(state.selection.main.from).toBe(2)
+    expect(state.selection.main.to).toBe(7)
+  })
+
+  it('bolds the word containing the cursor', () => {
+    const state = format(autoCloseState('hello', 2), '**')
+    expect(state.doc.toString()).toBe('**hello**')
+    expect(state.selection.main.from).toBe(2)
+    expect(state.selection.main.to).toBe(7)
+  })
+
+  it('underlines an explicit selection with HTML underline tags', () => {
+    const state = format(autoCloseState('hello', 0, 5), '<u>', '</u>')
+    expect(state.doc.toString()).toBe('<u>hello</u>')
+    expect(state.selection.main.from).toBe(3)
+    expect(state.selection.main.to).toBe(8)
+  })
+
+  it('removes matching formatting around the selected text', () => {
+    const state = format(autoCloseState('**hello**', 2, 7), '**')
+    expect(state.doc.toString()).toBe('hello')
+    expect(state.selection.main.from).toBe(0)
+    expect(state.selection.main.to).toBe(5)
   })
 })
 
