@@ -82,7 +82,7 @@ export const commentsKey = (docId: string) => ['doc-comments', docId] as const
 export const suggestionsKey = (docId: string) => ['doc-suggestions', docId] as const
 export const versionsKey = (docId: string) => ['doc-versions', docId] as const
 
-type Mode = 'edit' | 'suggest'
+export type Mode = 'edit' | 'suggest'
 type ConnStatus = 'connecting' | 'connected' | 'disconnected'
 
 interface Peer {
@@ -1097,6 +1097,7 @@ export function DocEditorPage({ docId, share }: { docId: string; share: string |
                   share={share}
                   me={me}
                   role={role}
+                  mode={mode}
                   suggestions={suggestions}
                   members={members}
                   activeSuggestionId={activeSuggestionId}

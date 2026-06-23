@@ -10,13 +10,14 @@ import {
 import { track } from '../../lib/analytics.ts'
 import { timeAgo } from '../../lib/presence.ts'
 import { Badge, Button, EmptyState } from '../ui.tsx'
-import { suggestionsKey } from './DocEditorPage.tsx'
+import { suggestionsKey, type Mode } from './DocEditorPage.tsx'
 
 interface Props {
   docId: string
   share: string | undefined
   me: { id: string } | null
   role: Role
+  mode: Mode
   suggestions: SuggestionWithMeta[]
   members: MemberInfo[]
   activeSuggestionId: string | null
@@ -31,6 +32,7 @@ export default function SuggestionsPanel({
   share,
   me,
   role,
+  mode,
   suggestions,
   activeSuggestionId,
   onSelect,
@@ -78,7 +80,11 @@ export default function SuggestionsPanel({
       <div className="p-3">
         <EmptyState
           title="No suggestions"
-          hint="Switch to Suggest mode (or push with ink --suggest) to propose changes for review."
+          hint={
+            mode === 'suggest'
+              ? 'Edit the document to propose changes — your edits appear here for review.'
+              : 'Switch to Suggest mode (or push with ink --suggest) to propose changes for review.'
+          }
         />
       </div>
     )
