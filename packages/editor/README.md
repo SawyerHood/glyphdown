@@ -14,6 +14,7 @@ and suggest mode (edits routed through `@glyphdown/core`'s `SuggestSession`).
 | `glyphdownCollab(ytext, awareness, undoManager)` | `yCollab` + `yUndoManagerKeymap`. **Never add CM `history()` next to this** |
 | `docAnnotations()`, `docAnnotationsField`, `setDocAnnotationsEffect`, `dispatchDocAnnotations` | Comment + suggestion range rendering |
 | `createSuggestMode(config)`, `suggestModeOrigin` | Suggest mode (put `.extension` in a `Compartment`) |
+| `markdownAutoClose()`, `markdownFormat(state, open, close?)` | Markdown pair insertion, word wrapping, Backspace pair deletion, and Mod-B/I/U formatting shortcuts |
 | `glyphdownTheme`, `glyphdownHighlighting()`, `glyphdownHighlightStyle` | Minimal document-like default theme (all classes overridable) |
 
 ## Integration
